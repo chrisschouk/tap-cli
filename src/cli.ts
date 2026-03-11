@@ -63,6 +63,14 @@ export function buildProgram(): Command {
   return program;
 }
 
+// Handle --version/-v before Commander
+const hasVersionFlag = process.argv.includes("--version") || process.argv.includes("-v");
+
+if (hasVersionFlag) {
+  intro(VERSION);
+  process.exit(0);
+}
+
 // Interactive mode: bare `tap` with no args
 const isInteractive = process.argv.length <= 2;
 
@@ -71,12 +79,5 @@ if (isInteractive) {
   import("./ui/interactive.js").then(({ runInteractive }) => runInteractive());
 } else {
   const program = buildProgram();
-
-  // Show logo on --version
-  program.on("option:version", () => {
-    intro(VERSION);
-    process.exit(0);
-  });
-
   program.parse();
 }

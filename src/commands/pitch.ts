@@ -14,7 +14,9 @@ import * as prompts from "@clack/prompts";
 import { getClient, resolveWorkspaceId, getAnthropicKey } from "../auth.js";
 import * as out from "../output.js";
 import { GLYPH, COLOUR } from "../ui/theme.js";
-import { createRailSpinner, divider } from "../ui/format.js";
+import { createRailSpinner, divider, blank } from "../ui/format.js";
+import { handleError } from "../ui/errors.js";
+import { navHint } from "../ui/detail.js";
 import {
   gatherPitchContext,
   getUnpitchedContacts,
@@ -301,8 +303,10 @@ export function pitchCommand(): Command {
           }
           console.log("");
         }
+        navHint(["tap send <pitch-id>", "tap contacts show <id>"]);
+        blank();
       } catch (err) {
-        out.error(err instanceof Error ? err.message : "Unknown error");
+        handleError(err);
         process.exit(1);
       }
     });

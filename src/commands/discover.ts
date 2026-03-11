@@ -16,8 +16,9 @@ import * as prompts from "@clack/prompts";
 import { getClient, resolveWorkspaceId, loadConfig } from "../auth.js";
 import * as out from "../output.js";
 import { GLYPH } from "../ui/theme.js";
-import { sectionHeader, percentage } from "../ui/detail.js";
-import { createRailSpinner, stepComplete, blank } from "../ui/format.js";
+import { sectionHeader, percentage, navHint } from "../ui/detail.js";
+import { createRailSpinner, stepComplete, blank, summaryBar } from "../ui/format.js";
+import { handleError } from "../ui/errors.js";
 import { discoverContacts, deduplicateContacts } from "../lib/discover.js";
 
 function getPerplexityKey(): string | null {
@@ -162,8 +163,6 @@ export function discoverCommand(): Command {
           return;
         }
 
-        const toImport = importable;
-
         if (!opts.import) {
           blank();
           const shouldImport = await prompts.confirm({
@@ -179,14 +178,14 @@ export function discoverCommand(): Command {
         // Batch insert
         blank();
         const importRail = createRailSpinner(
-          `Importing ${toImport.length} contacts`,
+          `Importing ${importable.length} contacts`,
         ).start();
 
         const CHUNK_SIZE = 100;
         let imported = 0;
 
-        for (let i = 0; i < toImport.length; i += CHUNK_SIZE) {
-          const chunk = toImport.slice(i, i + CHUNK_SIZE);
+        for (let i = 0; i < importable.length; i += CHUNK_SIZE) {
+          const chunk = importable.slice(i, i + CHUNK_SIZE);
           const rows = chunk.map((c) => ({
             workspace_id: wsId,
             name: c.name,
@@ -211,7 +210,7 @@ export function discoverCommand(): Command {
 
         // Queue for enrichment if requested
         if (opts.enrich && imported > 0) {
-          const emails = toImport.map((c) => c.email!.toLowerCase().trim());
+          const emails = importable.map((c) => c.email!.toLowerCase().trim());
           await supabase
             .from("tap_contacts")
             .update({ enrichment_source: "queued" })
@@ -223,8 +222,19 @@ export function discoverCommand(): Command {
         }
 
         blank();
+        summaryBar([
+          `${discovered.length} found`,
+          `${imported} imported`,
+          `${existingContacts.length} existing`,
+        ]);
+
+        navHint([
+          "tap contacts list --sort last-contacted",
+          `tap discover "${searchTerm}"`,
+        ]);
+        blank();
       } catch (err) {
-        out.error(err instanceof Error ? err.message : "Unknown error");
+        handleError(err);
         process.exit(1);
       }
     });

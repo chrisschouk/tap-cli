@@ -16,6 +16,7 @@ import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
 import { GLYPH, COLOUR } from "../ui/theme.js";
 import { relativeDate } from "../ui/detail.js";
+import { handleError } from "../ui/errors.js";
 
 export function watchCommand(): Command {
   return new Command("watch")
@@ -395,7 +396,7 @@ export function watchCommand(): Command {
           process.exit(0);
         });
       } catch (err) {
-        out.error(err instanceof Error ? err.message : "Unknown error");
+        handleError(err);
         process.exit(1);
       }
     });

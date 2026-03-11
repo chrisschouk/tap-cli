@@ -7,8 +7,37 @@ import chalk from "chalk";
 import * as prompts from "@clack/prompts";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
-import { GLYPH, COLOUR } from "../ui/theme.js";
-import { sectionHeader, sparkbar, shortDate, navHint } from "../ui/detail.js";
+import { GLYPH, COLOUR, WARMTH_COLOUR } from "../ui/theme.js";
+import { sectionHeader, sparkbar, shortDate, navHint, ansiPadEnd } from "../ui/detail.js";
+import { handleError } from "../ui/errors.js";
+import { blank } from "../ui/format.js";
+
+function renderCoverage(clips: Array<{ title: string | null; type: string | null; url: string | null; publish_date: string | null }>): void {
+  sectionHeader("Coverage", `${clips.length}`);
+  for (const clip of clips) {
+    console.log(
+      `  ${out.truncate(clip.title, 34)?.padEnd(34)}  ${chalk.dim(clip.type?.padEnd(12) || "")}  ${shortDate(clip.publish_date)}`,
+    );
+    if (clip.url) {
+      console.log(`    ${chalk.dim(clip.url)}`);
+    }
+  }
+}
+
+function renderOutcomes(outcomes: Array<{ outcome_type: string }>): void {
+  const outcomeDist: Record<string, number> = {};
+  for (const o of outcomes) {
+    outcomeDist[o.outcome_type] = (outcomeDist[o.outcome_type] || 0) + 1;
+  }
+  sectionHeader("Outcomes", `${outcomes.length}`);
+  const sorted = Object.entries(outcomeDist).sort(([, a], [, b]) => b - a);
+  for (const [type, count] of sorted) {
+    const ratio = count / outcomes.length;
+    console.log(
+      `  ${ansiPadEnd(type.replace(/_/g, " "), 18)}${sparkbar(ratio)}  ${String(count).padStart(4)}`,
+    );
+  }
+}
 
 /**
  * Show full campaign detail view with health metrics and coverage.
@@ -28,7 +57,7 @@ export async function showCampaign(
       supabase
         .from("tap_projects")
         .select(
-          "id, name, artist_name, status, release_name, release_date, goal, created_at, momentum_score, momentum_trend",
+          "id, workspace_id, name, artist_name, status, release_name, release_date, goal, created_at, momentum_score, momentum_trend",
         )
         .eq("id", id)
         .single(),
@@ -204,7 +233,7 @@ export async function showCampaign(
         if (!count) continue;
         const ratio = count / total;
         console.log(
-          `  ${out.pitchStatusBadge(status)?.padEnd(16)}${sparkbar(ratio)}  ${String(count).padStart(4)}`,
+          `  ${ansiPadEnd(out.pitchStatusBadge(status) || "", 16)}${sparkbar(ratio)}  ${String(count).padStart(4)}`,
         );
       }
       // Any other statuses
@@ -212,90 +241,60 @@ export async function showCampaign(
         if (funnelOrder.includes(status)) continue;
         const ratio = count / total;
         console.log(
-          `  ${out.pitchStatusBadge(status)?.padEnd(16)}${sparkbar(ratio)}  ${String(count).padStart(4)}`,
+          `  ${ansiPadEnd(out.pitchStatusBadge(status) || "", 16)}${sparkbar(ratio)}  ${String(count).padStart(4)}`,
         );
       }
     }
 
-    // -- Progressive disclosure for coverage + outcomes (TTY only) --
-    const hasMoreSections = coverageClips.length > 0 || outcomes.length > 0;
+    // -- Progressive disclosure + actions (TTY only) --
+    if (process.stdout.isTTY) {
+      const { campaignActionMenu } = await import("../ui/actions.js");
 
-    if (hasMoreSections && process.stdout.isTTY) {
       while (true) {
         const drillOptions: Array<{ value: string; label: string; hint?: string }> = [];
-        if (coverageClips.length > 0) drillOptions.push({ value: "coverage", label: "Coverage", hint: `${coverageClips.length} clips` });
-        if (outcomes.length > 0) drillOptions.push({ value: "outcomes", label: "Outcome distribution", hint: `${outcomes.length}` });
+
+        // Viewing options
+        if (coverageClips.length > 0) drillOptions.push({ value: "coverage", label: "View coverage", hint: `${coverageClips.length} clips` });
+        if (outcomes.length > 0) drillOptions.push({ value: "outcomes", label: "View outcomes", hint: `${outcomes.length}` });
+
+        // Action options
+        const unpitchedCount = contacts.filter((c) => !c.pitch_status || c.pitch_status === "not_pitched").length;
+        if (unpitchedCount > 0) drillOptions.push({ value: "pitch", label: "Pitch a contact", hint: `${unpitchedCount} unpitched` });
+        drillOptions.push({ value: "outcome", label: "Log outcome" });
+        drillOptions.push({ value: "status", label: "Change status", hint: campaign.status });
+        drillOptions.push({ value: "open", label: "Open in TAP" });
         drillOptions.push({ value: "done", label: chalk.dim("Done") });
 
         const drill = (await prompts.select({
-          message: "Show more?",
+          message: "What next?",
           options: drillOptions,
         })) as string | symbol;
 
         if (prompts.isCancel(drill) || drill === "done") break;
 
         if (drill === "coverage") {
-          sectionHeader("Coverage", `${coverageClips.length}`);
-          for (const clip of coverageClips) {
-            console.log(
-              `  ${out.truncate(clip.title, 34)?.padEnd(34)}  ${chalk.dim(clip.type?.padEnd(12) || "")}  ${shortDate(clip.publish_date)}`,
-            );
-            if (clip.url) {
-              console.log(`    ${chalk.dim(clip.url)}`);
-            }
-          }
-        }
-
-        if (drill === "outcomes") {
-          const outcomeDist: Record<string, number> = {};
-          for (const o of outcomes) {
-            outcomeDist[o.outcome_type] = (outcomeDist[o.outcome_type] || 0) + 1;
-          }
-          sectionHeader("Outcomes", `${outcomes.length}`);
-          const sorted = Object.entries(outcomeDist).sort(([, a], [, b]) => b - a);
-          for (const [type, count] of sorted) {
-            const ratio = count / outcomes.length;
-            console.log(
-              `  ${type.replace(/_/g, " ").padEnd(18)}${sparkbar(ratio)}  ${String(count).padStart(4)}`,
-            );
-          }
+          renderCoverage(coverageClips);
+        } else if (drill === "outcomes") {
+          renderOutcomes(outcomes);
+        } else {
+          // Delegate to campaign action menu for pitch/outcome/status/open
+          const result = await campaignActionMenu(supabase, campaign.workspace_id, id);
+          if (result === "back") continue;
+          // After an action, break out (state may have changed)
+          break;
         }
       }
-    } else if (!process.stdout.isTTY) {
+    } else {
       // Non-interactive: dump everything
-      if (coverageClips.length > 0) {
-        sectionHeader("Coverage", `${coverageClips.length}`);
-        for (const clip of coverageClips) {
-          console.log(
-            `  ${out.truncate(clip.title, 34)?.padEnd(34)}  ${chalk.dim(clip.type?.padEnd(12) || "")}  ${shortDate(clip.publish_date)}`,
-          );
-          if (clip.url) {
-            console.log(`    ${chalk.dim(clip.url)}`);
-          }
-        }
-      }
-
-      if (outcomes.length > 0) {
-        const outcomeDist: Record<string, number> = {};
-        for (const o of outcomes) {
-          outcomeDist[o.outcome_type] = (outcomeDist[o.outcome_type] || 0) + 1;
-        }
-        sectionHeader("Outcomes", `${outcomes.length}`);
-        const sorted = Object.entries(outcomeDist).sort(([, a], [, b]) => b - a);
-        for (const [type, count] of sorted) {
-          const ratio = count / outcomes.length;
-          console.log(
-            `  ${type.replace(/_/g, " ").padEnd(18)}${sparkbar(ratio)}  ${String(count).padStart(4)}`,
-          );
-        }
-      }
+      if (coverageClips.length > 0) renderCoverage(coverageClips);
+      if (outcomes.length > 0) renderOutcomes(outcomes);
     }
 
     navHint([`tap open ${id.slice(0, 8)}`]);
     console.log("");
   } catch (err) {
     spinner.stop();
-    out.error(err instanceof Error ? err.message : "Unknown error");
+    handleError(err);
     process.exit(1);
   }
 }
@@ -312,6 +311,11 @@ export function campaignsCommand(): Command {
     )
     .option("-w, --workspace <id>", "Workspace ID")
     .option("--json", "Output as JSON")
+    .addHelpText("after", `
+Examples:
+  tap campaigns list
+  tap campaigns list --status active
+  tap campaigns list --json`)
     .action(async (opts) => {
       const spinner = out.spinner("Fetching campaigns...");
 
@@ -391,10 +395,10 @@ export function campaignsCommand(): Command {
             let warmthCol = chalk.dim("\u2014");
             if (counts) {
               const parts: string[] = [];
-              if (counts.hot) parts.push(chalk.hex("#ef4444")(`${counts.hot}h`));
-              if (counts.warm) parts.push(chalk.hex("#f97316")(`${counts.warm}w`));
-              if (counts.neutral) parts.push(chalk.hex("#6b7280")(`${counts.neutral}n`));
-              if (counts.cold) parts.push(chalk.hex("#3b82f6")(`${counts.cold}c`));
+              if (counts.hot) parts.push(chalk.hex(WARMTH_COLOUR.hot)(`${counts.hot}h`));
+              if (counts.warm) parts.push(chalk.hex(WARMTH_COLOUR.warm)(`${counts.warm}w`));
+              if (counts.neutral) parts.push(chalk.hex(WARMTH_COLOUR.neutral)(`${counts.neutral}n`));
+              if (counts.cold) parts.push(chalk.hex(WARMTH_COLOUR.cold)(`${counts.cold}c`));
               warmthCol = parts.length > 0 ? parts.join(" ") : chalk.dim("\u2014");
             }
             return [
@@ -408,9 +412,15 @@ export function campaignsCommand(): Command {
         );
 
         out.info(`${data.length} campaigns`);
+
+        navHint([
+          "tap campaigns show <id>",
+          "tap queue",
+        ]);
+        blank();
       } catch (err) {
         spinner.stop();
-        out.error(err instanceof Error ? err.message : "Unknown error");
+        handleError(err);
         process.exit(1);
       }
     });
@@ -466,9 +476,15 @@ export function campaignsCommand(): Command {
         }
 
         out.success(`Campaign "${data.name}" created (${data.id})`);
+
+        navHint([
+          `tap campaigns show ${data.id.slice(0, 8)}`,
+          "tap contacts search \"...\"",
+        ]);
+        blank();
       } catch (err) {
         spinner.stop();
-        out.error(err instanceof Error ? err.message : "Unknown error");
+        handleError(err);
         process.exit(1);
       }
     });
@@ -522,7 +538,7 @@ export function campaignsCommand(): Command {
         out.success(`Campaign ${id} ${GLYPH.arrow} ${out.statusBadge(status)}`);
       } catch (err) {
         spinner.stop();
-        out.error(err instanceof Error ? err.message : "Unknown error");
+        handleError(err);
         process.exit(1);
       }
     });

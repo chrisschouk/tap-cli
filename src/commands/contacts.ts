@@ -26,7 +26,72 @@ import {
   warmthColour,
   navHint,
   shortDate,
+  ansiPadEnd,
 } from "../ui/detail.js";
+import { handleError } from "../ui/errors.js";
+import { blank } from "../ui/format.js";
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function renderIntelligence(contact: any, interactive = false): void {
+  sectionHeader("Intelligence");
+  console.log(field("Platform", contact.platform_type));
+  console.log(fieldList("Genres", contact.genres));
+  console.log(field("Geographic", contact.geographic_scope));
+  console.log(field("Best timing", contact.best_timing));
+  if (contact.bbc_station) {
+    console.log(field("BBC station", contact.bbc_station));
+    console.log(fieldList("BBC shows", contact.bbc_shows));
+  }
+  if (contact.submission_guidelines) {
+    console.log(field("Guidelines", out.truncate(contact.submission_guidelines, 60)));
+  }
+  if (contact.pitch_tips && contact.pitch_tips.length > 0) {
+    console.log(field("Pitch tips", ""));
+    for (const tip of contact.pitch_tips) {
+      console.log(`${"".padEnd(20)}${chalk.dim(".")} ${tip}`);
+    }
+  }
+  if (interactive) {
+    console.log(field("Confidence", contact.enrichment_confidence, {
+      colour: warmthColour(
+        contact.enrichment_confidence === "High" ? "warm" :
+        contact.enrichment_confidence === "Medium" ? "neutral" : "cold",
+      ),
+    }));
+  } else {
+    console.log(field("Confidence", contact.enrichment_confidence));
+  }
+  console.log(field("Enriched", relativeDate(contact.enriched_at)));
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function renderOutcomes(outcomes: any[]): void {
+  sectionHeader("Recent Outcomes", `${outcomes.length}`);
+  for (const o of outcomes) {
+    const campaign = o.artist_name
+      ? `${o.artist_name} -- ${o.project_name}`
+      : o.project_name || "";
+    console.log(
+      `  ${ansiPadEnd(out.pitchStatusBadge(o.outcome_type) || "", 14)}  ${(out.truncate(campaign, 28) || "").padEnd(28)}  ${shortDate(o.occurred_at)}`,
+    );
+    if (o.notes) {
+      console.log(`${"".padEnd(4)}${chalk.dim(`"${out.truncate(o.notes, 50)}"`)}`);
+    }
+  }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function renderCoverage(coverage: any[]): void {
+  sectionHeader("Coverage", `${coverage.length}`);
+  for (const c of coverage) {
+    console.log(
+      `  ${out.truncate(c.title, 34)?.padEnd(34)}  ${chalk.dim(c.type?.padEnd(12) || "")}  ${shortDate(c.publish_date)}`,
+    );
+    if (c.url) {
+      console.log(`${"".padEnd(4)}${chalk.dim(c.url)}`);
+    }
+  }
+}
 
 /**
  * Show full contact detail view.
@@ -92,7 +157,7 @@ export async function showContact(
       contact.email,
     ].filter(Boolean);
     console.log(`  ${chalk.dim(headerParts.join("  ·  "))}`);
-    console.log(chalk.dim(`  ${"\u2500".repeat(44)}`));
+    console.log(chalk.dim(`  ${"\u2500".repeat(52)}`));
 
     // -- Relationship (always shown) --
     if (metrics) {
@@ -139,7 +204,7 @@ export async function showContact(
           ? `${c.artist_name} -- ${c.project_name}`
           : c.project_name;
         console.log(
-          `  ${out.truncate(label, 32)?.padEnd(32)}  ${out.pitchStatusBadge(c.pitch_status)?.padEnd(14)}  ${shortDate(c.last_pitched_at)}`,
+          `  ${(out.truncate(label, 32) || "").padEnd(32)}  ${ansiPadEnd(out.pitchStatusBadge(c.pitch_status) || "", 14)}  ${shortDate(c.last_pitched_at)}`,
         );
       }
       if (campaigns.length > 3) {
@@ -174,7 +239,7 @@ export async function showContact(
       warningBlock(warnings);
     }
 
-    // -- Progressive disclosure (TTY only) --
+    // -- Progressive disclosure + actions (TTY only) --
     const hasIntel =
       contact.platform_type ||
       contact.genres?.length ||
@@ -184,144 +249,59 @@ export async function showContact(
       contact.submission_guidelines ||
       contact.pitch_tips?.length;
 
-    const hasMoreSections =
-      hasIntel || outcomes.length > 0 || coverage.length > 0 || campaigns.length > 3;
+    if (process.stdout.isTTY) {
+      const { contactActionMenu } = await import("../ui/actions.js");
 
-    if (hasMoreSections && process.stdout.isTTY) {
-      // Interactive drill-down
       while (true) {
         const drillOptions: Array<{ value: string; label: string; hint?: string }> = [];
+
+        // Viewing options
         if (hasIntel) drillOptions.push({ value: "intel", label: "Intelligence details", hint: contact.enrichment_confidence || undefined });
         if (outcomes.length > 0) drillOptions.push({ value: "outcomes", label: "Outcomes", hint: `${outcomes.length}` });
         if (coverage.length > 0) drillOptions.push({ value: "coverage", label: "Coverage", hint: `${coverage.length}` });
         if (campaigns.length > 3) drillOptions.push({ value: "campaigns", label: "All campaigns", hint: `${campaigns.length}` });
+
+        // Action options
+        drillOptions.push({ value: "actions", label: "Actions", hint: "pitch, outcome, enrich" });
         drillOptions.push({ value: "done", label: chalk.dim("Done") });
 
         const drill = (await prompts.select({
-          message: "Show more?",
+          message: "What next?",
           options: drillOptions,
         })) as string | symbol;
 
         if (prompts.isCancel(drill) || drill === "done") break;
 
         if (drill === "intel") {
-          sectionHeader("Intelligence");
-          console.log(field("Platform", contact.platform_type));
-          console.log(fieldList("Genres", contact.genres));
-          console.log(field("Geographic", contact.geographic_scope));
-          console.log(field("Best timing", contact.best_timing));
-          if (contact.bbc_station) {
-            console.log(field("BBC station", contact.bbc_station));
-            console.log(fieldList("BBC shows", contact.bbc_shows));
-          }
-          if (contact.submission_guidelines) {
-            console.log(field("Guidelines", out.truncate(contact.submission_guidelines, 60)));
-          }
-          if (contact.pitch_tips && contact.pitch_tips.length > 0) {
-            console.log(field("Pitch tips", ""));
-            for (const tip of contact.pitch_tips) {
-              console.log(`${"".padEnd(20)}${chalk.dim(".")} ${tip}`);
-            }
-          }
-          console.log(field("Confidence", contact.enrichment_confidence, {
-            colour: warmthColour(
-              contact.enrichment_confidence === "High" ? "warm" :
-              contact.enrichment_confidence === "Medium" ? "neutral" : "cold",
-            ),
-          }));
-          console.log(field("Enriched", relativeDate(contact.enriched_at)));
-        }
-
-        if (drill === "outcomes") {
-          sectionHeader("Recent Outcomes", `${outcomes.length}`);
-          for (const o of outcomes) {
-            const campaign = o.artist_name
-              ? `${o.artist_name} -- ${o.project_name}`
-              : o.project_name || "";
-            console.log(
-              `  ${out.pitchStatusBadge(o.outcome_type)?.padEnd(14)}  ${out.truncate(campaign, 28)?.padEnd(28)}  ${shortDate(o.occurred_at)}`,
-            );
-            if (o.notes) {
-              console.log(`${"".padEnd(4)}${chalk.dim(`"${out.truncate(o.notes, 50)}"`)}`);
-            }
-          }
-        }
-
-        if (drill === "coverage") {
-          sectionHeader("Coverage", `${coverage.length}`);
-          for (const c of coverage) {
-            console.log(
-              `  ${out.truncate(c.title, 34)?.padEnd(34)}  ${chalk.dim(c.type?.padEnd(12) || "")}  ${shortDate(c.publish_date)}`,
-            );
-            if (c.url) {
-              console.log(`${"".padEnd(4)}${chalk.dim(c.url)}`);
-            }
-          }
-        }
-
-        if (drill === "campaigns") {
+          renderIntelligence(contact, true);
+        } else if (drill === "outcomes") {
+          renderOutcomes(outcomes);
+        } else if (drill === "coverage") {
+          renderCoverage(coverage);
+        } else if (drill === "campaigns") {
           sectionHeader("All Campaigns", `${campaigns.length}`);
           for (const c of campaigns) {
             const label = c.artist_name
               ? `${c.artist_name} -- ${c.project_name}`
               : c.project_name;
             console.log(
-              `  ${out.truncate(label, 32)?.padEnd(32)}  ${out.pitchStatusBadge(c.pitch_status)?.padEnd(14)}  ${shortDate(c.last_pitched_at)}`,
+              `  ${(out.truncate(label, 32) || "").padEnd(32)}  ${ansiPadEnd(out.pitchStatusBadge(c.pitch_status) || "", 14)}  ${shortDate(c.last_pitched_at)}`,
             );
           }
+        } else if (drill === "actions") {
+          const supabase = getClient();
+          const wsId = await resolveWorkspaceId(supabase, opts.workspace);
+          const result = await contactActionMenu(supabase, wsId, contact.id);
+          if (result === "back") continue;
+          // After an action, break out (state may have changed)
+          break;
         }
       }
-    } else if (!process.stdout.isTTY) {
+    } else {
       // Non-interactive: dump everything
-      if (hasIntel) {
-        sectionHeader("Intelligence");
-        console.log(field("Platform", contact.platform_type));
-        console.log(fieldList("Genres", contact.genres));
-        console.log(field("Geographic", contact.geographic_scope));
-        console.log(field("Best timing", contact.best_timing));
-        if (contact.bbc_station) {
-          console.log(field("BBC station", contact.bbc_station));
-          console.log(fieldList("BBC shows", contact.bbc_shows));
-        }
-        if (contact.submission_guidelines) {
-          console.log(field("Guidelines", out.truncate(contact.submission_guidelines, 60)));
-        }
-        if (contact.pitch_tips && contact.pitch_tips.length > 0) {
-          console.log(field("Pitch tips", ""));
-          for (const tip of contact.pitch_tips) {
-            console.log(`${"".padEnd(20)}${chalk.dim(".")} ${tip}`);
-          }
-        }
-        console.log(field("Confidence", contact.enrichment_confidence));
-        console.log(field("Enriched", relativeDate(contact.enriched_at)));
-      }
-
-      if (outcomes.length > 0) {
-        sectionHeader("Recent Outcomes", `${outcomes.length}`);
-        for (const o of outcomes) {
-          const campaign = o.artist_name
-            ? `${o.artist_name} -- ${o.project_name}`
-            : o.project_name || "";
-          console.log(
-            `  ${out.pitchStatusBadge(o.outcome_type)?.padEnd(14)}  ${out.truncate(campaign, 28)?.padEnd(28)}  ${shortDate(o.occurred_at)}`,
-          );
-          if (o.notes) {
-            console.log(`${"".padEnd(4)}${chalk.dim(`"${out.truncate(o.notes, 50)}"`)}`);
-          }
-        }
-      }
-
-      if (coverage.length > 0) {
-        sectionHeader("Coverage", `${coverage.length}`);
-        for (const c of coverage) {
-          console.log(
-            `  ${out.truncate(c.title, 34)?.padEnd(34)}  ${chalk.dim(c.type?.padEnd(12) || "")}  ${shortDate(c.publish_date)}`,
-          );
-          if (c.url) {
-            console.log(`${"".padEnd(4)}${chalk.dim(c.url)}`);
-          }
-        }
-      }
+      if (hasIntel) renderIntelligence(contact);
+      if (outcomes.length > 0) renderOutcomes(outcomes);
+      if (coverage.length > 0) renderCoverage(coverage);
     }
 
     // -- Navigation hints --
@@ -334,7 +314,7 @@ export async function showContact(
     console.log("");
   } catch (err) {
     spinner.stop();
-    out.error(err instanceof Error ? err.message : "Unknown error");
+    handleError(err);
     process.exit(1);
   }
 }
@@ -481,7 +461,7 @@ export async function showHistory(
       `  ${chalk.bold(contact.name || contact.email)}${contact.outlet ? chalk.dim(` -- ${contact.outlet}`) : ""}`,
     );
     console.log(`  ${chalk.dim(`Timeline (${limited.length} events)`)}`);
-    console.log(chalk.dim(`  ${"\u2500".repeat(44)}`));
+    console.log(chalk.dim(`  ${"\u2500".repeat(52)}`));
     console.log("");
 
     if (limited.length === 0) {
@@ -493,14 +473,14 @@ export async function showHistory(
       for (const e of limited) {
         const dateStr = shortDate(e.date);
         console.log(
-          `  ${dateStr.padEnd(8)}${out.pitchStatusBadge(e.type)?.padEnd(14)}  ${chalk.dim(out.truncate(e.campaign, 30) || "")}`,
+          `  ${dateStr.padEnd(8)}${ansiPadEnd(out.pitchStatusBadge(e.type) || "", 14)}  ${chalk.dim(out.truncate(e.campaign, 30) || "")}`,
         );
         if (e.detail) {
           console.log(`           ${chalk.dim(out.truncate(e.detail, 50))}`);
         }
       }
 
-      console.log(chalk.dim(`  ${"\u2500".repeat(44)}`));
+      console.log(chalk.dim(`  ${"\u2500".repeat(52)}`));
       console.log(
         chalk.dim(`  ${limited.length} events across ${uniqueCampaigns.size} campaign${uniqueCampaigns.size === 1 ? "" : "s"}`),
       );
@@ -513,7 +493,7 @@ export async function showHistory(
     console.log("");
   } catch (err) {
     spinner.stop();
-    out.error(err instanceof Error ? err.message : "Unknown error");
+    handleError(err);
     process.exit(1);
   }
 }
@@ -532,6 +512,11 @@ export function contactsCommand(): Command {
     .option("-w, --workspace <id>", "Workspace ID")
     .option("-l, --limit <n>", "Max results", "50")
     .option("--json", "Output as JSON")
+    .addHelpText("after", `
+Examples:
+  tap contacts list --warm --sort warmth
+  tap contacts list --bbc --sort response
+  tap contacts list --genre electronic -l 20`)
     .action(async (opts) => {
       const spinner = out.spinner("Fetching contacts...").start();
 
@@ -652,9 +637,15 @@ export function contactsCommand(): Command {
         );
 
         out.info(`${limited.length} of ${count || 0} contacts${opts.warm ? " (warm/hot only)" : ""}`);
+
+        navHint([
+          "tap contacts show <id>",
+          "tap contacts search \"...\"",
+        ]);
+        blank();
       } catch (err) {
         spinner.stop();
-        out.error(err instanceof Error ? err.message : "Unknown error");
+        handleError(err);
         process.exit(1);
       }
     });
@@ -751,9 +742,15 @@ export function contactsCommand(): Command {
         );
 
         out.info(`${data.length} results`);
+
+        navHint([
+          "tap contacts show <id>",
+          "tap contacts add --name \"...\" --email \"...\"",
+        ]);
+        blank();
       } catch (err) {
         spinner.stop();
-        out.error(err instanceof Error ? err.message : "Unknown error");
+        handleError(err);
         process.exit(1);
       }
     });
@@ -823,9 +820,15 @@ export function contactsCommand(): Command {
 
         out.success(`Added ${data.name} <${data.email}>`);
         out.info(`ID: ${data.id}`);
+
+        navHint([
+          `tap contacts show ${data.id.slice(0, 8)}`,
+          `tap contacts enrich ${data.id.slice(0, 8)}`,
+        ]);
+        blank();
       } catch (err) {
         spinner.stop();
-        out.error(err instanceof Error ? err.message : "Unknown error");
+        handleError(err);
         process.exit(1);
       }
     });
@@ -855,7 +858,7 @@ export function contactsCommand(): Command {
         out.success(`Contact ${id} queued for enrichment`);
       } catch (err) {
         spinner.stop();
-        out.error(err instanceof Error ? err.message : "Unknown error");
+        handleError(err);
         process.exit(1);
       }
     });

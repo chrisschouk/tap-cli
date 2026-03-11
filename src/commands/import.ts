@@ -14,8 +14,10 @@ import * as prompts from "@clack/prompts";
 import { readFileSync } from "node:fs";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
-import { createRailSpinner, stepComplete, blank } from "../ui/format.js";
-import { sectionHeader } from "../ui/detail.js";
+import { COLOUR } from "../ui/theme.js";
+import { createRailSpinner, stepComplete, blank, summaryBar } from "../ui/format.js";
+import { sectionHeader, navHint } from "../ui/detail.js";
+import { handleError } from "../ui/errors.js";
 import {
   type TapContactInsert,
   mapSinkRecordToContact,
@@ -66,6 +68,22 @@ function parseCsv(text: string): PlainContact[] {
     return obj;
   });
 }
+
+const EMPTY_ENRICHMENT_FIELDS = {
+  platform_type: null,
+  genres: null,
+  coverage_area: null,
+  coverage_areas: null,
+  geographic_scope: null,
+  best_timing: null,
+  submission_guidelines: null,
+  pitch_tips: null,
+  enrichment_confidence: null,
+  contact_method: null,
+  enriched: false,
+  enriched_at: null,
+  enrichment_source: null,
+} as const;
 
 /**
  * Map plain JSON/CSV contact to TAP insert format.
@@ -179,22 +197,7 @@ export function importCommand(): Command {
             for (const item of parsed as PlainContact[]) {
               const mapped = mapPlainContact(item);
               if (mapped) {
-                contacts.push({
-                  ...mapped,
-                  platform_type: null,
-                  genres: null,
-                  coverage_area: null,
-                  coverage_areas: null,
-                  geographic_scope: null,
-                  best_timing: null,
-                  submission_guidelines: null,
-                  pitch_tips: null,
-                  enrichment_confidence: null,
-                  contact_method: null,
-                  enriched: false,
-                  enriched_at: null,
-                  enrichment_source: null,
-                });
+                contacts.push({ ...mapped, ...EMPTY_ENRICHMENT_FIELDS });
               } else {
                 skippedInvalid++;
               }
@@ -208,22 +211,7 @@ export function importCommand(): Command {
           for (const row of rows) {
             const mapped = mapPlainContact(row);
             if (mapped) {
-              contacts.push({
-                ...mapped,
-                platform_type: null,
-                genres: null,
-                coverage_area: null,
-                coverage_areas: null,
-                geographic_scope: null,
-                best_timing: null,
-                submission_guidelines: null,
-                pitch_tips: null,
-                enrichment_confidence: null,
-                contact_method: null,
-                enriched: false,
-                enriched_at: null,
-                enrichment_source: null,
-              });
+              contacts.push({ ...mapped, ...EMPTY_ENRICHMENT_FIELDS });
             } else {
               skippedInvalid++;
             }
@@ -260,17 +248,17 @@ export function importCommand(): Command {
         sectionHeader("Import Preview");
         console.log(`  ${"Valid emails".padEnd(18)}${contacts.length}`);
         if (skippedInvalid > 0) {
-          console.log(`  ${"Invalid".padEnd(18)}${chalk.hex("#eab308")(`${skippedInvalid} skipped`)}`);
+          console.log(`  ${"Invalid".padEnd(18)}${chalk.hex(COLOUR.warning)(`${skippedInvalid} skipped`)}`);
         }
         if (skippedDuplicate > 0) {
-          console.log(`  ${"Duplicates".padEnd(18)}${chalk.hex("#eab308")(`${skippedDuplicate} skipped`)}`);
+          console.log(`  ${"Duplicates".padEnd(18)}${chalk.hex(COLOUR.warning)(`${skippedDuplicate} skipped`)}`);
         }
         if (alreadyInTap > 0) {
-          console.log(`  ${"Already in TAP".padEnd(18)}${chalk.hex("#eab308")(`${alreadyInTap} skipped`)}`);
+          console.log(`  ${"Already in TAP".padEnd(18)}${chalk.hex(COLOUR.warning)(`${alreadyInTap} skipped`)}`);
         }
-        console.log(`  ${"New contacts".padEnd(18)}${chalk.hex("#22c55e")(String(newContacts.length))}`);
+        console.log(`  ${"New contacts".padEnd(18)}${chalk.hex(COLOUR.success)(String(newContacts.length))}`);
         if (withEnrichment > 0) {
-          console.log(`  ${"With enrichment".padEnd(18)}${chalk.hex("#06b6d4")(`${withEnrichment} from sink`)}`);
+          console.log(`  ${"With enrichment".padEnd(18)}${chalk.hex(COLOUR.primary)(`${withEnrichment} from sink`)}`);
         }
         blank();
 
@@ -398,11 +386,23 @@ export function importCommand(): Command {
           });
         }
 
+        // Summary
+        const summaryParts: string[] = [];
+        summaryParts.push(`${imported} imported`);
+        if (errors > 0) summaryParts.push(chalk.hex(COLOUR.danger)(`${errors} errors`));
+        if (newContacts.filter((c) => c.enriched).length > 0) {
+          summaryParts.push(`${newContacts.filter((c) => c.enriched).length} enriched`);
+        }
         blank();
-        console.log(chalk.dim(`  tap contacts list --sort last-contacted`));
+        summaryBar(summaryParts);
+
+        navHint([
+          "tap contacts list --sort last-contacted",
+          "tap queue",
+        ]);
         blank();
       } catch (err) {
-        out.error(err instanceof Error ? err.message : "Unknown error");
+        handleError(err);
         process.exit(1);
       }
     });

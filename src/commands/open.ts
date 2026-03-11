@@ -12,6 +12,7 @@ import { exec } from "node:child_process";
 import { platform } from "node:os";
 import { getClient } from "../auth.js";
 import * as out from "../output.js";
+import { handleError } from "../ui/errors.js";
 
 const TAP_BASE = "https://tap.totalaudiopromo.com";
 
@@ -85,7 +86,7 @@ export function openCommand(): Command {
         out.error(`No contact or campaign found with ID: ${id}`);
         process.exit(1);
       } catch (err) {
-        out.error(err instanceof Error ? err.message : "Unknown error");
+        handleError(err);
         process.exit(1);
       }
     });

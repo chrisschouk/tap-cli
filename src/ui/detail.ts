@@ -9,6 +9,25 @@ import { GLYPH, WARMTH_COLOUR } from "./theme.js";
 
 const LABEL_WIDTH = 18;
 
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+
+/**
+ * Strip ANSI escape codes to get the visible length of a string.
+ */
+export function stripAnsi(str: string): string {
+  return str.replace(ANSI_RE, "");
+}
+
+/**
+ * ANSI-aware padEnd -- pads based on visible character count, not raw string length.
+ */
+export function ansiPadEnd(str: string, width: number): string {
+  const visible = stripAnsi(str).length;
+  const pad = Math.max(0, width - visible);
+  return str + " ".repeat(pad);
+}
+
 /**
  * Render a label: value pair with consistent padding.
  * Null/undefined values render as a dim dash.
@@ -46,11 +65,11 @@ export function fieldList(
 export function sectionHeader(title: string, meta?: string): void {
   console.log("");
   if (meta) {
-    console.log(`  ${chalk.bold(title)}${" ".repeat(Math.max(1, 44 - title.length - meta.length))}${chalk.dim(meta)}`);
+    console.log(`  ${chalk.bold(title)}${" ".repeat(Math.max(1, 52 - title.length - meta.length))}${chalk.dim(meta)}`);
   } else {
     console.log(`  ${chalk.bold(title)}`);
   }
-  console.log(chalk.dim(`  ${GLYPH.divider.repeat(44)}`));
+  console.log(chalk.dim(`  ${GLYPH.divider.repeat(52)}`));
 }
 
 /**

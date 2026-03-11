@@ -10,6 +10,9 @@
 import { Command } from "commander";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
+import { handleError } from "../ui/errors.js";
+import { navHint } from "../ui/detail.js";
+import { blank } from "../ui/format.js";
 import {
   mapOutcomeToStatuses,
   VALID_OUTCOME_TYPES,
@@ -24,8 +27,14 @@ export function outcomeCommand(): Command {
     .argument("<type>", `Outcome type: ${VALID_OUTCOME_TYPES.join(", ")}`)
     .option("-n, --notes <text>", "Notes about the outcome")
     .option("-c, --channel <channel>", "Channel (radio, press, playlist, sync)")
+    .option("--dry-run", "Preview without saving")
     .option("-w, --workspace <id>", "Workspace ID")
     .option("--json", "Output as JSON")
+    .addHelpText("after", `
+Examples:
+  tap outcome abc123 def456 replied --notes "Loved it, wants exclusive"
+  tap outcome abc123 def456 played --channel radio
+  tap outcome abc123 def456 declined --dry-run`)
     .action(async (campaignId, contactId, type, opts) => {
       // Validate outcome type
       if (!VALID_OUTCOME_TYPES.includes(type as OutcomeType)) {
@@ -40,6 +49,15 @@ export function outcomeCommand(): Command {
         const supabase = getClient();
         const wsId = await resolveWorkspaceId(supabase, opts.workspace);
         const statuses = mapOutcomeToStatuses(type as OutcomeType);
+
+        if (opts.dryRun) {
+          spinner.stop();
+          out.info(`Dry run -- would log "${type}" for contact ${contactId} in campaign ${campaignId}`);
+          if (statuses.pitchStatus) out.info(`Would set pitch status: ${statuses.pitchStatus}`);
+          if (statuses.pipelineStatus) out.info(`Would set pipeline status: ${statuses.pipelineStatus}`);
+          if (opts.notes) out.info(`Notes: ${opts.notes}`);
+          return;
+        }
 
         // Insert outcome record
         const { data: outcome, error: insertErr } = await supabase
@@ -108,9 +126,11 @@ export function outcomeCommand(): Command {
         if (opts.notes) {
           out.info(`Notes: ${opts.notes}`);
         }
+        navHint(["tap queue", "tap contacts history <id>"]);
+        blank();
       } catch (err) {
         spinner.stop();
-        out.error(err instanceof Error ? err.message : "Unknown error");
+        handleError(err);
         process.exit(1);
       }
     });

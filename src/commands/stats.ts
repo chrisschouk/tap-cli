@@ -9,7 +9,9 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
-import { sectionHeader, sparkbar, percentage } from "../ui/detail.js";
+import { sectionHeader, sparkbar, percentage, navHint, ansiPadEnd } from "../ui/detail.js";
+import { handleError } from "../ui/errors.js";
+import { blank } from "../ui/format.js";
 
 export function statsCommand(): Command {
   return new Command("stats")
@@ -219,7 +221,7 @@ export function statsCommand(): Command {
             const pct = Math.round(ratio * 100);
             const badge = out.warmthBadge(level);
             console.log(
-              `  ${badge.padEnd(22)}${sparkbar(ratio)}  ${String(count).padStart(4)} (${pct}%)`,
+              `  ${ansiPadEnd(badge, 22)}${sparkbar(ratio)}  ${String(count).padStart(4)} (${pct}%)`,
             );
           }
         }
@@ -242,7 +244,7 @@ export function statsCommand(): Command {
           sectionHeader("Top Contacts", "min 3 pitches");
           for (const c of topContactDetails) {
             console.log(
-              `  ${out.truncate(c.name, 18)?.padEnd(18)}  ${out.truncate(c.outlet, 16)?.padEnd(16) || chalk.dim("\u2014".padEnd(16))}  ${percentage(c.response_rate)?.padEnd(8)}  ${out.warmthBadge(c.warmth_level)}`,
+              `  ${(out.truncate(c.name, 18) || "").padEnd(18)}  ${(out.truncate(c.outlet, 16) || chalk.dim("\u2014")).padEnd(16)}  ${ansiPadEnd(percentage(c.response_rate) || "", 8)}  ${out.warmthBadge(c.warmth_level)}`,
             );
           }
         }
@@ -259,10 +261,15 @@ export function statsCommand(): Command {
           }
         }
 
-        console.log("");
+        navHint([
+          "tap queue",
+          "tap campaigns list",
+          "tap contacts list --warm",
+        ]);
+        blank();
       } catch (err) {
         spinner.stop();
-        out.error(err instanceof Error ? err.message : "Unknown error");
+        handleError(err);
         process.exit(1);
       }
     });

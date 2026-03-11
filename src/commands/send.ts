@@ -12,8 +12,9 @@ import chalk from "chalk";
 import * as prompts from "@clack/prompts";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
-import { warningBlock } from "../ui/detail.js";
-import { createRailSpinner, stepComplete, blank } from "../ui/format.js";
+import { warningBlock, navHint } from "../ui/detail.js";
+import { createRailSpinner, stepComplete, blank, summaryBar } from "../ui/format.js";
+import { handleError } from "../ui/errors.js";
 import {
   getGmailConnection,
   ensureFreshToken,
@@ -288,8 +289,19 @@ export function sendCommand(): Command {
         }
 
         blank();
+        summaryBar([
+          "Sent",
+          `To: ${contact.email}`,
+          `Follow-up: ${followUp.toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`,
+        ]);
+
+        navHint([
+          "tap queue",
+          `tap contacts history ${contact.id.slice(0, 8)}`,
+        ]);
+        blank();
       } catch (err) {
-        out.error(err instanceof Error ? err.message : "Unknown error");
+        handleError(err);
         process.exit(1);
       }
     });

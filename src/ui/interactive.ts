@@ -3,6 +3,7 @@
  *
  * Loops through main menu until user selects Exit or presses Ctrl+C.
  * Supports drill-down from list views into detail views with back navigation.
+ * Every screen offers actions -- pitch, outcome, enrich, send.
  */
 
 import * as prompts from "@clack/prompts";
@@ -14,12 +15,49 @@ import { getClient, resolveWorkspaceId } from "../auth.js";
 import { showContact, showHistory } from "../commands/contacts.js";
 import { showCampaign } from "../commands/campaigns.js";
 import * as out from "../output.js";
+import { contactActionMenu, campaignActionMenu } from "./actions.js";
 
 export async function runInteractive(): Promise<void> {
-  intro(VERSION);
+  // Fetch context stats before rendering intro
+  let contextBar: { contacts: number; campaigns: number; followUps: number } | null = null;
+
+  try {
+    const supabase = getClient();
+    const wsId = await resolveWorkspaceId(supabase);
+
+    const threeDaysAgo = new Date();
+    threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+
+    const [campResult, contactResult, followUpResult] = await Promise.all([
+      supabase
+        .from("tap_projects")
+        .select("id", { count: "exact", head: true })
+        .eq("workspace_id", wsId)
+        .eq("status", "active"),
+      supabase
+        .from("tap_contacts")
+        .select("id", { count: "exact", head: true })
+        .eq("workspace_id", wsId),
+      supabase
+        .from("campaign_contacts")
+        .select("contact_id", { count: "exact", head: true })
+        .eq("pitch_status", "sent")
+        .lt("last_pitched_at", threeDaysAgo.toISOString()),
+    ]);
+
+    contextBar = {
+      contacts: contactResult.count || 0,
+      campaigns: campResult.count || 0,
+      followUps: followUpResult.count || 0,
+    };
+  } catch {
+    // Non-critical
+  }
+
+  intro(VERSION, { commands: true, contextBar: contextBar || undefined });
 
   while (true) {
-    // Fetch live hints in parallel
+    // Refresh hints each loop
     let campaignHint = "";
     let contactHint = "";
     let queueHint = "";
@@ -27,6 +65,9 @@ export async function runInteractive(): Promise<void> {
     try {
       const supabase = getClient();
       const wsId = await resolveWorkspaceId(supabase);
+
+      const threeDaysAgo = new Date();
+      threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
 
       const [campResult, contactResult, followUpResult] = await Promise.all([
         supabase
@@ -38,15 +79,11 @@ export async function runInteractive(): Promise<void> {
           .from("tap_contacts")
           .select("id", { count: "exact", head: true })
           .eq("workspace_id", wsId),
-        (() => {
-          const threeDaysAgo = new Date();
-          threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
-          return supabase
-            .from("campaign_contacts")
-            .select("contact_id", { count: "exact", head: true })
-            .eq("pitch_status", "sent")
-            .lt("last_pitched_at", threeDaysAgo.toISOString());
-        })(),
+        supabase
+          .from("campaign_contacts")
+          .select("contact_id", { count: "exact", head: true })
+          .eq("pitch_status", "sent")
+          .lt("last_pitched_at", threeDaysAgo.toISOString()),
       ]);
 
       const activeCampaigns = campResult.count || 0;
@@ -57,7 +94,7 @@ export async function runInteractive(): Promise<void> {
       contactHint = `${totalContacts} total`;
       queueHint = followUps > 0 ? `${followUps} follow-ups due` : "all clear";
     } catch {
-      // Hints are non-critical, continue without them
+      // Hints are non-critical
     }
 
     const action = (await prompts.select({
@@ -79,14 +116,39 @@ export async function runInteractive(): Promise<void> {
           hint: "generate AI pitch drafts",
         },
         {
+          value: "send" as const,
+          label: "Send",
+          hint: "send a pitch via Gmail",
+        },
+        {
+          value: "outcome" as const,
+          label: "Outcome",
+          hint: "log a campaign outcome",
+        },
+        {
           value: "queue" as const,
           label: "Queue",
           hint: queueHint || "today's action queue",
         },
         {
+          value: "discover" as const,
+          label: "Discover",
+          hint: "find new contacts",
+        },
+        {
+          value: "import" as const,
+          label: "Import",
+          hint: "import from CSV/JSON",
+        },
+        {
           value: "stats" as const,
           label: "Stats",
           hint: "workspace statistics",
+        },
+        {
+          value: "watch" as const,
+          label: "Watch",
+          hint: "live campaign updates",
         },
         { value: "open" as const, label: "Open TAP", hint: "open in browser" },
         { value: "exit" as const, label: "Exit" },
@@ -109,11 +171,26 @@ export async function runInteractive(): Promise<void> {
       case "pitch":
         await runCommand(["pitch"]);
         break;
+      case "send":
+        await sendMenu();
+        break;
+      case "outcome":
+        await outcomeMenu();
+        break;
       case "queue":
         await runCommand(["queue"]);
         break;
+      case "discover":
+        await discoverMenu();
+        break;
+      case "import":
+        await importMenu();
+        break;
       case "stats":
         await runCommand(["stats"]);
+        break;
+      case "watch":
+        await watchMenu();
         break;
       case "open":
         await runCommand(["open"]);
@@ -130,6 +207,7 @@ async function campaignsMenu(): Promise<void> {
         { value: "list" as const, label: "List campaigns" },
         { value: "show" as const, label: "Show campaign details" },
         { value: "create" as const, label: "Create campaign" },
+        { value: "status" as const, label: "Change status" },
         { value: "back" as const, label: chalk.dim("Back") },
       ],
     })) as string | symbol;
@@ -180,23 +258,9 @@ async function campaignsMenu(): Promise<void> {
             blank();
             await showCampaign(drill as string, {});
 
-            // Campaign drill-down actions
-            const next = (await prompts.select({
-              message: "What next?",
-              options: [
-                { value: "contacts" as const, label: "View contacts" },
-                { value: "open" as const, label: "Open in TAP" },
-                { value: "back" as const, label: chalk.dim("Back to list") },
-              ],
-            })) as string | symbol;
-
-            if (prompts.isCancel(next) || next === "back") continue;
-
-            if (next === "contacts") {
-              await runCommand(["campaigns", "show", drill as string]);
-            } else if (next === "open") {
-              await runCommand(["open", (drill as string).slice(0, 8)]);
-            }
+            // Campaign actions via shared helper
+            const result = await campaignActionMenu(supabase, wsId, drill as string);
+            if (result !== "back") break;
           }
         } catch {
           spinner.stop();
@@ -211,19 +275,6 @@ async function campaignsMenu(): Promise<void> {
         if (prompts.isCancel(id)) continue;
         blank();
         await showCampaign(id as string, {});
-
-        // Drill-down after manual show
-        const next = (await prompts.select({
-          message: "What next?",
-          options: [
-            { value: "open" as const, label: "Open in TAP" },
-            { value: "back" as const, label: chalk.dim("Back") },
-          ],
-        })) as string | symbol;
-
-        if (!prompts.isCancel(next) && next === "open") {
-          await runCommand(["open", (id as string).slice(0, 8)]);
-        }
         break;
       }
       case "create": {
@@ -241,6 +292,36 @@ async function campaignsMenu(): Promise<void> {
         const args = ["campaigns", "create", "--name", name as string];
         if (artist) args.push("--artist", artist as string);
         await runCommand(args);
+        break;
+      }
+      case "status": {
+        try {
+          const supabase = getClient();
+          const wsId = await resolveWorkspaceId(supabase);
+          const { selectCampaign } = await import("./actions.js");
+
+          const campaignId = await selectCampaign(supabase, wsId, {
+            message: "Which campaign?",
+          });
+          if (!campaignId) continue;
+
+          const status = await prompts.select({
+            message: "New status",
+            options: [
+              { value: "draft", label: "Draft" },
+              { value: "active", label: "Active" },
+              { value: "paused", label: "Paused" },
+              { value: "completed", label: "Completed" },
+              { value: "archived", label: "Archived" },
+            ],
+          });
+
+          if (prompts.isCancel(status)) continue;
+
+          await runCommand(["campaigns", "status", campaignId, status as string]);
+        } catch {
+          // handled
+        }
         break;
       }
     }
@@ -270,7 +351,6 @@ async function contactsMenu(): Promise<void> {
           const supabase = getClient();
           const wsId = await resolveWorkspaceId(supabase);
 
-          // Fetch contacts with warmth for hints
           const [contactResult, metricsResult] = await Promise.all([
             supabase
               .from("tap_contacts")
@@ -295,18 +375,10 @@ async function contactsMenu(): Promise<void> {
             break;
           }
 
-          // Build warmth lookup
-          const warmthMap = new Map<string, string>();
-          if (metricsResult.data) {
-            for (const m of metricsResult.data) {
-              if (m.warmth_level) warmthMap.set(m.contact_id, m.warmth_level);
-            }
-          }
+          const warmthMap = buildWarmthMap(metricsResult.data);
 
-          // Show table first
           await runCommand(["contacts", "list", "--limit", "20"]);
 
-          // Drill-down loop
           await contactListDrillDown(data, warmthMap);
         } catch {
           spinner.stop();
@@ -354,18 +426,10 @@ async function contactsMenu(): Promise<void> {
             break;
           }
 
-          // Build warmth lookup
-          const warmthMap = new Map<string, string>();
-          if (metricsResult.data) {
-            for (const m of metricsResult.data) {
-              if (m.warmth_level) warmthMap.set(m.contact_id, m.warmth_level);
-            }
-          }
+          const warmthMap = buildWarmthMap(metricsResult.data);
 
-          // Show table
           await runCommand(["contacts", "search", query as string]);
 
-          // Drill-down loop
           await contactListDrillDown(data, warmthMap);
         } catch {
           spinner.stop();
@@ -432,8 +496,147 @@ async function contactsMenu(): Promise<void> {
   }
 }
 
+async function sendMenu(): Promise<void> {
+  try {
+    const supabase = getClient();
+    const wsId = await resolveWorkspaceId(supabase);
+
+    const spinner = out.spinner("Loading unsent drafts...");
+    const { data: drafts, error } = await supabase
+      .from("campaign_pitch_drafts")
+      .select("id, subject, contact_id, campaign_id, created_at")
+      .eq("workspace_id", wsId)
+      .eq("send_status", "draft")
+      .order("created_at", { ascending: false })
+      .limit(15);
+
+    spinner.stop();
+
+    if (error || !drafts || drafts.length === 0) {
+      out.info("No unsent drafts. Generate a pitch first.");
+      return;
+    }
+
+    // Resolve contact names
+    const contactIds = [...new Set(drafts.map((d) => d.contact_id).filter(Boolean))];
+    let contactMap = new Map<string, string>();
+    if (contactIds.length > 0) {
+      const { data: contacts } = await supabase
+        .from("tap_contacts")
+        .select("id, name")
+        .in("id", contactIds);
+      contactMap = new Map((contacts || []).map((c) => [c.id, c.name || c.id.slice(0, 8)]));
+    }
+
+    const selected = await prompts.select({
+      message: "Select draft to send",
+      options: [
+        ...drafts.map((d) => ({
+          value: d.id as string,
+          label: d.subject || "No subject",
+          hint: contactMap.get(d.contact_id) || undefined,
+        })),
+        { value: "__back__" as string, label: chalk.dim("Cancel") },
+      ],
+    });
+
+    if (prompts.isCancel(selected) || selected === "__back__") return;
+
+    await runCommand(["send", selected as string]);
+  } catch {
+    // handled
+  }
+}
+
+async function outcomeMenu(): Promise<void> {
+  try {
+    const supabase = getClient();
+    const wsId = await resolveWorkspaceId(supabase);
+    const { selectCampaign, selectCampaignContact, outcomePrompt: doOutcome } = await import("./actions.js");
+
+    const campaignId = await selectCampaign(supabase, wsId, {
+      message: "Which campaign?",
+    });
+    if (!campaignId) return;
+
+    const contactId = await selectCampaignContact(supabase, campaignId, {
+      message: "Which contact?",
+    });
+    if (!contactId) return;
+
+    blank();
+    await doOutcome(supabase, wsId, campaignId, contactId);
+  } catch {
+    // handled
+  }
+}
+
+async function discoverMenu(): Promise<void> {
+  const query = await prompts.text({
+    message: "Search for contacts",
+    placeholder: 'e.g. "BBC Radio 6 Music", "dance music London"',
+    validate: (v) => (!v?.trim() ? "Required" : undefined),
+  });
+
+  if (prompts.isCancel(query)) return;
+
+  await runCommand(["discover", query as string]);
+}
+
+async function importMenu(): Promise<void> {
+  const file = await prompts.text({
+    message: "File path (CSV, JSON, or JSONL)",
+    placeholder: "e.g. contacts.csv",
+    validate: (v) => (!v?.trim() ? "Required" : undefined),
+  });
+
+  if (prompts.isCancel(file)) return;
+
+  await runCommand(["import", file as string]);
+}
+
+async function watchMenu(): Promise<void> {
+  try {
+    const supabase = getClient();
+    const wsId = await resolveWorkspaceId(supabase);
+
+    const mode = await prompts.select({
+      message: "Watch mode",
+      options: [
+        { value: "workspace" as const, label: "Workspace overview" },
+        { value: "campaign" as const, label: "Single campaign" },
+      ],
+    });
+
+    if (prompts.isCancel(mode)) return;
+
+    if (mode === "campaign") {
+      const { selectCampaign } = await import("./actions.js");
+      const campaignId = await selectCampaign(supabase, wsId, {
+        message: "Which campaign to watch?",
+      });
+      if (!campaignId) return;
+      await runCommand(["watch", "--campaign", campaignId]);
+    } else {
+      await runCommand(["watch"]);
+    }
+  } catch {
+    // handled
+  }
+}
+
+function buildWarmthMap(metricsData: Array<{ contact_id: string; warmth_level: string | null }> | null): Map<string, string> {
+  const map = new Map<string, string>();
+  if (metricsData) {
+    for (const m of metricsData) {
+      if (m.warmth_level) map.set(m.contact_id, m.warmth_level);
+    }
+  }
+  return map;
+}
+
 /**
- * Drill-down from a contact list, with warmth hints and back-to-list navigation.
+ * Drill-down from a contact list, with warmth hints and action options.
  */
 async function contactListDrillDown(
   data: Array<{ id: string; name: string | null; email: string; outlet: string | null }>,
@@ -461,31 +664,38 @@ async function contactListDrillDown(
     blank();
     await showContact(drill as string, {});
 
-    // After viewing, offer next actions -- then return to list
+    // After viewing, offer actions via shared helper
     await contactDrillDown(drill as string);
   }
 }
 
 /**
- * After viewing contact details, offer next actions.
+ * After viewing contact details, offer action options.
  */
 async function contactDrillDown(contactId: string): Promise<void> {
-  const next = (await prompts.select({
-    message: "What next?",
-    options: [
-      { value: "history" as const, label: "View history" },
-      { value: "open" as const, label: "Open in TAP" },
-      { value: "back" as const, label: chalk.dim("Back to list") },
-    ],
-  })) as string | symbol;
+  try {
+    const supabase = getClient();
+    const wsId = await resolveWorkspaceId(supabase);
+    await contactActionMenu(supabase, wsId, contactId);
+  } catch {
+    // Fall back to basic options if auth fails
+    const next = (await prompts.select({
+      message: "What next?",
+      options: [
+        { value: "history" as const, label: "View history" },
+        { value: "open" as const, label: "Open in TAP" },
+        { value: "back" as const, label: chalk.dim("Back") },
+      ],
+    })) as string | symbol;
 
-  if (prompts.isCancel(next) || next === "back") return;
+    if (prompts.isCancel(next) || next === "back") return;
 
-  if (next === "history") {
-    blank();
-    await showHistory(contactId, {});
-  } else if (next === "open") {
-    await runCommand(["open", contactId.slice(0, 8)]);
+    if (next === "history") {
+      blank();
+      await showHistory(contactId, {});
+    } else if (next === "open") {
+      await runCommand(["open", contactId.slice(0, 8)]);
+    }
   }
 }
 

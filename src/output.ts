@@ -14,6 +14,7 @@ import {
   CONFIDENCE_COLOUR,
   PITCH_STATUS_COLOUR,
 } from "./ui/theme.js";
+import { stripAnsi, ansiPadEnd } from "./ui/detail.js";
 
 /**
  * Create a spinner that writes to stderr so it doesn't pollute --json output.
@@ -23,9 +24,9 @@ export function spinner(text: string): Ora {
 }
 
 export function table(headers: string[], rows: string[][]): void {
-  // Calculate column widths
+  // Calculate column widths using visible (ANSI-stripped) lengths
   const widths = headers.map((h, i) => {
-    const maxRow = Math.max(...rows.map((r) => (r[i] || "").length));
+    const maxRow = Math.max(...rows.map((r) => stripAnsi(r[i] || "").length));
     return Math.max(h.length, maxRow);
   });
 
@@ -37,7 +38,7 @@ export function table(headers: string[], rows: string[][]): void {
   // Print rows
   for (const row of rows) {
     const line = row
-      .map((cell, i) => (cell || "").padEnd(widths[i]))
+      .map((cell, i) => ansiPadEnd(cell || "", widths[i]))
       .join("  ");
     console.log(`  ${line}`);
   }
