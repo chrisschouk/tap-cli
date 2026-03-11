@@ -1,6 +1,6 @@
 {
   "name": "tap-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "CLI for Total Audio Platform — manage campaigns, contacts, and pitches from the terminal",
   "license": "MIT",
   "type": "module",
@@ -19,6 +19,7 @@
     "prepublishOnly": "pnpm test && pnpm build"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
     "@clack/prompts": "^0.9.1",
     "@supabase/supabase-js": "^2.49.3",
     "chalk": "^5.4.1",

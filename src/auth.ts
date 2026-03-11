@@ -1,23 +1,30 @@
 /**
- * CLI auth — manages Supabase credentials.
+ * CLI auth -- manages Supabase credentials and API keys.
  *
  * Reads from:
  *   1. Environment variables (SUPABASE_URL, SUPABASE_KEY)
  *   2. Config file (~/.tap/config.json)
  */
 
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  existsSync,
+  chmodSync,
+} from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 
-const CONFIG_DIR = join(homedir(), '.tap');
-const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
+const CONFIG_DIR = join(homedir(), ".tap");
+const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 
 interface TapConfig {
   supabaseUrl: string;
   supabaseKey: string;
   workspaceId?: string;
+  anthropicKey?: string;
 }
 
 export function loadConfig(): TapConfig | null {
@@ -33,6 +40,7 @@ export function loadConfig(): TapConfig | null {
       supabaseUrl: envUrl,
       supabaseKey: envKey,
       workspaceId: process.env.TAP_WORKSPACE_ID,
+      anthropicKey: process.env.ANTHROPIC_API_KEY,
     };
   }
 
@@ -40,7 +48,7 @@ export function loadConfig(): TapConfig | null {
   if (!existsSync(CONFIG_FILE)) return null;
 
   try {
-    const raw = readFileSync(CONFIG_FILE, 'utf-8');
+    const raw = readFileSync(CONFIG_FILE, "utf-8");
     return JSON.parse(raw) as TapConfig;
   } catch {
     return null;
@@ -59,7 +67,7 @@ export function getClient(): SupabaseClient {
   const config = loadConfig();
   if (!config) {
     throw new Error(
-      'Not authenticated. Run "tap auth login" or set SUPABASE_URL and SUPABASE_KEY environment variables.'
+      'Not authenticated. Run "tap auth login" or set SUPABASE_URL and SUPABASE_KEY environment variables.',
     );
   }
 
@@ -73,9 +81,16 @@ export function getWorkspaceId(): string | undefined {
   return config?.workspaceId || process.env.TAP_WORKSPACE_ID;
 }
 
+export function getAnthropicKey(): string | undefined {
+  // Env var takes priority
+  if (process.env.ANTHROPIC_API_KEY) return process.env.ANTHROPIC_API_KEY;
+  const config = loadConfig();
+  return config?.anthropicKey;
+}
+
 export async function resolveWorkspaceId(
   supabase: SupabaseClient,
-  provided?: string
+  provided?: string,
 ): Promise<string> {
   if (provided) return provided;
 
@@ -84,12 +99,14 @@ export async function resolveWorkspaceId(
 
   // Try to find the first workspace
   const { data } = await supabase
-    .from('workspace_members')
-    .select('workspace_id')
+    .from("workspace_members")
+    .select("workspace_id")
     .limit(1)
     .single();
 
   if (data?.workspace_id) return data.workspace_id;
 
-  throw new Error('Could not resolve workspace. Pass --workspace or set TAP_WORKSPACE_ID.');
+  throw new Error(
+    "Could not resolve workspace. Pass --workspace or set TAP_WORKSPACE_ID.",
+  );
 }
