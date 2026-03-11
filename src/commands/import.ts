@@ -15,6 +15,8 @@ import { readFileSync } from "node:fs";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
 import { GLYPH } from "../ui/theme.js";
+import { createRailSpinner, stepComplete, blank } from "../ui/format.js";
+import { sectionHeader } from "../ui/detail.js";
 import {
   type TapContactInsert,
   mapSinkRecordToContact,
@@ -102,7 +104,7 @@ export function importCommand(): Command {
         process.exit(1);
       }
 
-      const spinner = out.spinner("Reading input...").start();
+      const readRail = createRailSpinner("Reading input").start();
 
       try {
         const supabase = getClient();
@@ -116,7 +118,11 @@ export function importCommand(): Command {
           rawText = readFileSync(file, "utf-8");
         }
 
-        // Detect format
+        readRail.succeed(`Reading input            ${opts.stdin ? "stdin" : file}`);
+
+        // Parse
+        const parseRail = createRailSpinner("Parsing").start();
+
         const contacts: TapContactInsert[] = [];
         let sourceLabel = "";
         let totalRecords = 0;
@@ -151,8 +157,7 @@ export function importCommand(): Command {
           const sinkFormat = detectSinkFormat(parsed);
 
           if (sinkFormat !== "unknown") {
-            // Sink format
-            sourceLabel = `${opts.stdin ? "stdin" : file} (sink format detected)`;
+            sourceLabel = `sink format`;
             const records = extractSinkRecords(parsed, sinkFormat);
             totalRecords = records.length;
 
@@ -169,8 +174,7 @@ export function importCommand(): Command {
               }
             }
           } else if (Array.isArray(parsed)) {
-            // Plain JSON array
-            sourceLabel = `${opts.stdin ? "stdin" : file} (JSON)`;
+            sourceLabel = `JSON`;
             totalRecords = parsed.length;
 
             for (const item of parsed as PlainContact[]) {
@@ -198,8 +202,7 @@ export function importCommand(): Command {
             }
           }
         } else {
-          // CSV
-          sourceLabel = `${opts.stdin ? "stdin" : file} (CSV)`;
+          sourceLabel = `CSV`;
           const rows = parseCsv(rawText);
           totalRecords = rows.length;
 
@@ -229,12 +232,15 @@ export function importCommand(): Command {
         }
 
         if (contacts.length === 0) {
-          spinner.stop();
-          out.error("No valid contacts found in input");
+          parseRail.fail("No valid contacts found in input");
           process.exit(1);
         }
 
+        parseRail.succeed(`Parsing                  ${totalRecords} records (${sourceLabel})`);
+
         // Deduplicate against workspace
+        const dedupRail = createRailSpinner("Deduplicating").start();
+
         const emails = contacts.map((c) => c.email);
         const { data: existing } = await supabase
           .from("tap_contacts")
@@ -246,29 +252,28 @@ export function importCommand(): Command {
         const newContacts = contacts.filter((c) => !existingEmails.has(c.email));
         const alreadyInTap = contacts.length - newContacts.length;
 
-        spinner.stop();
+        dedupRail.succeed(
+          `Deduplicating            ${newContacts.length} new, ${alreadyInTap} existing`,
+        );
 
-        // Preview
-        console.log("");
-        console.log(`  ${chalk.bold("Import Preview")}`);
-        console.log(chalk.dim(`  ${GLYPH.divider.repeat(44)}`));
-        console.log(`  ${"Source".padEnd(18)}${sourceLabel}`);
-        console.log(`  ${"Total records".padEnd(18)}${totalRecords}`);
+        // Summary
+        blank();
+        sectionHeader("Import Preview");
         console.log(`  ${"Valid emails".padEnd(18)}${contacts.length}`);
         if (skippedInvalid > 0) {
-          console.log(`  ${"Invalid emails".padEnd(18)}${chalk.yellow(`${skippedInvalid} (skipped)`)}`);
+          console.log(`  ${"Invalid".padEnd(18)}${chalk.hex("#eab308")(`${skippedInvalid} skipped`)}`);
         }
         if (skippedDuplicate > 0) {
-          console.log(`  ${"Duplicates".padEnd(18)}${chalk.yellow(`${skippedDuplicate} (skipped)`)}`);
+          console.log(`  ${"Duplicates".padEnd(18)}${chalk.hex("#eab308")(`${skippedDuplicate} skipped`)}`);
         }
         if (alreadyInTap > 0) {
-          console.log(`  ${"Already in TAP".padEnd(18)}${chalk.yellow(`${alreadyInTap} (skipped)`)}`);
+          console.log(`  ${"Already in TAP".padEnd(18)}${chalk.hex("#eab308")(`${alreadyInTap} skipped`)}`);
         }
-        console.log(`  ${"New contacts".padEnd(18)}${chalk.green(newContacts.length)}`);
+        console.log(`  ${"New contacts".padEnd(18)}${chalk.hex("#22c55e")(String(newContacts.length))}`);
         if (withEnrichment > 0) {
-          console.log(`  ${"With enrichment".padEnd(18)}${chalk.cyan(`${withEnrichment} contacts have sink enrichment`)}`);
+          console.log(`  ${"With enrichment".padEnd(18)}${chalk.hex("#06b6d4")(`${withEnrichment} from sink`)}`);
         }
-        console.log("");
+        blank();
 
         if (opts.json && opts.dryRun) {
           out.json({
@@ -306,9 +311,9 @@ export function importCommand(): Command {
           }
         }
 
-        // Batch insert
-        const importSpinner = out.spinner(
-          `Importing ${newContacts.length} contacts...`,
+        // Batch insert with progress
+        const importRail = createRailSpinner(
+          `Importing ${newContacts.length} contacts`,
         ).start();
 
         const CHUNK_SIZE = 100;
@@ -333,14 +338,9 @@ export function importCommand(): Command {
           } else {
             imported += chunk.length;
           }
-
-          // Progress bar
-          const progress = Math.min(i + CHUNK_SIZE, newContacts.length);
-          const ratio = progress / newContacts.length;
-          const barWidth = 32;
-          const filled = Math.round(ratio * barWidth);
-          importSpinner.text = `Importing... ${GLYPH.blockFull.repeat(filled)}${GLYPH.blockLight.repeat(barWidth - filled)} ${progress}/${newContacts.length}`;
         }
+
+        importRail.succeed(`Importing                ${imported} contacts`);
 
         // Add to campaign if specified
         if (opts.campaign && imported > 0) {
@@ -365,6 +365,8 @@ export function importCommand(): Command {
                 ignoreDuplicates: true,
               });
           }
+
+          stepComplete(`Campaign                 ${opts.campaign.slice(0, 8)}`);
         }
 
         // Queue for enrichment
@@ -380,25 +382,11 @@ export function importCommand(): Command {
               .eq("workspace_id", wsId)
               .in("email", unenrichedEmails)
               .is("enriched_at", null);
+
+            stepComplete(`Enrichment queued        ${unenrichedEmails.length} contacts`);
           }
         }
 
-        importSpinner.stop();
-
-        out.success(`${imported} contacts imported`);
-        if (withEnrichment > 0) {
-          const enrichedImported = newContacts.filter((c) => c.enriched).length;
-          out.success(`${enrichedImported} imported with sink enrichment data`);
-        }
-        if (opts.enrich) {
-          const unenrichedCount = newContacts.filter((c) => !c.enriched).length;
-          if (unenrichedCount > 0) {
-            out.success(`${unenrichedCount} queued for TAP enrichment`);
-          }
-        }
-        if (opts.campaign) {
-          out.success(`Added to campaign ${opts.campaign}`);
-        }
         if (errors > 0) {
           out.warn(`${errors} batch${errors > 1 ? "es" : ""} had errors`);
         }
@@ -411,11 +399,10 @@ export function importCommand(): Command {
           });
         }
 
-        console.log("");
+        blank();
         console.log(chalk.dim(`  tap contacts list --sort last-contacted`));
-        console.log("");
+        blank();
       } catch (err) {
-        spinner.stop();
         out.error(err instanceof Error ? err.message : "Unknown error");
         process.exit(1);
       }

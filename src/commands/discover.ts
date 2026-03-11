@@ -17,13 +17,12 @@ import { getClient, resolveWorkspaceId, loadConfig } from "../auth.js";
 import * as out from "../output.js";
 import { GLYPH } from "../ui/theme.js";
 import { sectionHeader, percentage } from "../ui/detail.js";
+import { createRailSpinner, stepComplete, blank } from "../ui/format.js";
 import { discoverContacts, deduplicateContacts } from "../lib/discover.js";
 
 function getPerplexityKey(): string | null {
-  // Check env var
   if (process.env.PERPLEXITY_API_KEY) return process.env.PERPLEXITY_API_KEY;
 
-  // Check config file
   const config = loadConfig();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const perplexityKey = (config as any)?.perplexityKey;
@@ -62,9 +61,8 @@ export function discoverCommand(): Command {
 
       const searchTerm =
         query || opts.station || `${opts.genre || ""} ${opts.region || ""}`.trim();
-      const spinner = out.spinner(
-        `Discovering contacts for "${searchTerm}"...`,
-      ).start();
+
+      const searchRail = createRailSpinner(`Searching "${searchTerm}"`).start();
 
       try {
         const supabase = getClient();
@@ -82,19 +80,24 @@ export function discoverCommand(): Command {
         );
 
         if (discovered.length === 0) {
-          spinner.stop();
-          out.info("No contacts found. Try a different search.");
+          searchRail.fail("No contacts found. Try a different search.");
           return;
         }
 
+        searchRail.succeed(`Searching                ${discovered.length} found`);
+
         // Deduplicate against existing
+        const dedupRail = createRailSpinner("Deduplicating").start();
+
         const { newContacts, existingContacts } = await deduplicateContacts(
           supabase,
           wsId,
           discovered,
         );
 
-        spinner.stop();
+        dedupRail.succeed(
+          `Deduplicating            ${newContacts.length} new, ${existingContacts.length} existing`,
+        );
 
         if (opts.json) {
           out.json({
@@ -104,12 +107,6 @@ export function discoverCommand(): Command {
           });
           return;
         }
-
-        // Display header
-        console.log("");
-        console.log(
-          `  Found ${chalk.bold(discovered.length)} contacts (${existingContacts.length} already in TAP)`,
-        );
 
         // New contacts
         if (newContacts.length > 0) {
@@ -152,7 +149,7 @@ export function discoverCommand(): Command {
 
         // Import prompt
         if (newContacts.length === 0) {
-          console.log("");
+          blank();
           out.info("All discovered contacts are already in TAP");
           return;
         }
@@ -160,7 +157,7 @@ export function discoverCommand(): Command {
         const importable = newContacts.filter((c) => c.email);
 
         if (importable.length === 0) {
-          console.log("");
+          blank();
           out.warn("No new contacts have email addresses -- cannot import");
           return;
         }
@@ -168,7 +165,7 @@ export function discoverCommand(): Command {
         const toImport = importable;
 
         if (!opts.import) {
-          console.log("");
+          blank();
           const shouldImport = await prompts.confirm({
             message: `Import ${importable.length} new contacts?`,
           });
@@ -180,8 +177,9 @@ export function discoverCommand(): Command {
         }
 
         // Batch insert
-        const insertSpinner = out.spinner(
-          `Importing ${toImport.length} contacts...`,
+        blank();
+        const importRail = createRailSpinner(
+          `Importing ${toImport.length} contacts`,
         ).start();
 
         const CHUNK_SIZE = 100;
@@ -209,6 +207,8 @@ export function discoverCommand(): Command {
           }
         }
 
+        importRail.succeed(`Importing                ${imported} contacts`);
+
         // Queue for enrichment if requested
         if (opts.enrich && imported > 0) {
           const emails = toImport.map((c) => c.email!.toLowerCase().trim());
@@ -218,17 +218,12 @@ export function discoverCommand(): Command {
             .eq("workspace_id", wsId)
             .in("email", emails)
             .is("enriched_at", null);
+
+          stepComplete("Enrichment queued");
         }
 
-        insertSpinner.stop();
-
-        out.success(`${imported} contacts imported`);
-        if (opts.enrich) {
-          out.success("Queued for enrichment");
-        }
-        console.log("");
+        blank();
       } catch (err) {
-        spinner.stop();
         out.error(err instanceof Error ? err.message : "Unknown error");
         process.exit(1);
       }

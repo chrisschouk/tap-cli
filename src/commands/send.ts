@@ -14,6 +14,7 @@ import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
 import { GLYPH } from "../ui/theme.js";
 import { warningBlock } from "../ui/detail.js";
+import { createRailSpinner, stepComplete, blank } from "../ui/format.js";
 import {
   getGmailConnection,
   ensureFreshToken,
@@ -33,7 +34,7 @@ export function sendCommand(): Command {
     .option("--dry-run", "Preview without sending")
     .option("--json", "Structured output with message ID")
     .action(async (pitchId, opts) => {
-      const spinner = out.spinner("Loading pitch...").start();
+      const rail = createRailSpinner("Loading pitch").start();
 
       try {
         const supabase = getClient();
@@ -49,18 +50,20 @@ export function sendCommand(): Command {
           .single();
 
         if (pitchErr || !pitch) {
-          spinner.stop();
-          out.error(pitchErr?.message || `Pitch not found: ${pitchId}`);
+          rail.fail(pitchErr?.message || `Pitch not found: ${pitchId}`);
           process.exit(1);
         }
 
         if (pitch.send_status === "sent") {
-          spinner.stop();
-          out.warn(`This pitch was already sent on ${pitch.sent_at ? new Date(pitch.sent_at).toLocaleDateString("en-GB") : "unknown date"}`);
+          rail.fail(`Already sent on ${pitch.sent_at ? new Date(pitch.sent_at).toLocaleDateString("en-GB") : "unknown date"}`);
           process.exit(1);
         }
 
+        rail.succeed("Loading pitch");
+
         // Resolve contact and campaign in parallel
+        const contactRail = createRailSpinner("Resolving contact").start();
+
         const [contactResult, campaignResult, gmailConn, dailyCount] =
           await Promise.all([
             pitch.contact_id
@@ -81,19 +84,19 @@ export function sendCommand(): Command {
             getDailySendCount(supabase, wsId),
           ]);
 
-        spinner.stop();
-
         const contact = contactResult.data;
         const campaign = campaignResult.data;
 
         if (!contact?.email) {
-          out.error("No contact email associated with this pitch");
+          contactRail.fail("No contact email associated with this pitch");
           process.exit(1);
         }
 
+        contactRail.succeed(`Resolving contact        ${contact.name || ""} <${contact.email}>`);
+
         if (!gmailConn && !opts.dryRun) {
           out.error(
-            "No Gmail connection found. Connect Gmail in TAP web first: tap.totalaudiopromo.com/settings/integrations",
+            "No Gmail connection. Connect in TAP: tap.totalaudiopromo.com/settings/integrations",
           );
           process.exit(1);
         }
@@ -105,10 +108,11 @@ export function sendCommand(): Command {
           process.exit(1);
         }
 
+        stepComplete(`Checking Gmail           ${dailyCount}/${DAILY_SEND_CAP} daily cap`);
+
         // Relationship warnings
         const warnings: string[] = [];
         if (contact.total_pitches && contact.total_pitches >= 3) {
-          // Check recent pitch frequency
           const ninetyDaysAgo = new Date();
           ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
           const { count: recentPitches } = await supabase
@@ -159,33 +163,22 @@ export function sendCommand(): Command {
           }
         }
 
-        // Display
-        console.log("");
-        console.log(`  ${chalk.bold("Sending pitch...")}`);
-        console.log(chalk.dim(`  ${GLYPH.divider.repeat(44)}`));
-        console.log("");
-
-        console.log(
-          `  ${chalk.dim("To".padEnd(12))}${contact.name || ""} <${contact.email}>`,
-        );
-        console.log(
-          `  ${chalk.dim("Subject".padEnd(12))}${pitch.subject}`,
-        );
-        if (campaign) {
-          const campaignLabel = campaign.artist_name
-            ? `${campaign.artist_name} -- ${campaign.name}`
-            : campaign.name;
-          console.log(
-            `  ${chalk.dim("Campaign".padEnd(12))}${campaignLabel}`,
-          );
-        }
-
         if (warnings.length > 0) {
           warningBlock(warnings);
         }
 
-        // Preview body
-        console.log("");
+        // Preview
+        blank();
+        console.log(`  ${chalk.dim("To".padEnd(12))}${contact.name || ""} <${contact.email}>`);
+        console.log(`  ${chalk.dim("Subject".padEnd(12))}${pitch.subject}`);
+        if (campaign) {
+          const campaignLabel = campaign.artist_name
+            ? `${campaign.artist_name} -- ${campaign.name}`
+            : campaign.name;
+          console.log(`  ${chalk.dim("Campaign".padEnd(12))}${campaignLabel}`);
+        }
+
+        blank();
         console.log(`  ${chalk.dim("Preview:")}`);
         const allBodyLines = pitch.body.split("\n");
         for (const line of allBodyLines.slice(0, 5)) {
@@ -194,7 +187,7 @@ export function sendCommand(): Command {
         if (allBodyLines.length > 5) {
           console.log(chalk.dim(`  [truncated at 5 lines]`));
         }
-        console.log("");
+        blank();
 
         if (opts.dryRun) {
           out.info("Dry run -- nothing sent");
@@ -222,7 +215,8 @@ export function sendCommand(): Command {
         }
 
         // Send
-        const sendSpinner = out.spinner("Sending via Gmail...").start();
+        blank();
+        const sendRail = createRailSpinner("Sending via Gmail").start();
 
         const accessToken = await ensureFreshToken(supabase, gmailConn!);
         const rawMessage = buildRawMessage(
@@ -236,10 +230,11 @@ export function sendCommand(): Command {
           rawMessage,
         );
 
+        sendRail.succeed(`Sent via Gmail           msg: ${messageId}`);
+
         // Update database
         const now = new Date().toISOString();
         await Promise.all([
-          // Update pitch draft
           supabase
             .from("campaign_pitch_drafts")
             .update({
@@ -250,7 +245,6 @@ export function sendCommand(): Command {
               sent_via: "cli",
             })
             .eq("id", pitchId),
-          // Update campaign contact
           pitch.contact_id && pitch.campaign_id
             ? supabase
                 .from("campaign_contacts")
@@ -261,7 +255,6 @@ export function sendCommand(): Command {
                 .eq("contact_id", pitch.contact_id)
                 .eq("project_id", pitch.campaign_id)
             : Promise.resolve(),
-          // Log send
           supabase.from("gmail_send_logs").insert({
             workspace_id: wsId,
             user_id: gmailConn!.id,
@@ -276,16 +269,13 @@ export function sendCommand(): Command {
           }),
         ]);
 
-        sendSpinner.stop();
-
-        out.success(`Sent via Gmail (msg: ${messageId})`);
-        out.success("Pitch status updated to sent");
+        stepComplete("Status updated           sent");
 
         // Calculate follow-up date
         const followUp = new Date();
         followUp.setDate(followUp.getDate() + 5);
-        out.success(
-          `Next follow-up: ${followUp.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}`,
+        stepComplete(
+          `Follow-up                ${followUp.toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`,
         );
 
         if (opts.json) {
@@ -298,9 +288,8 @@ export function sendCommand(): Command {
           });
         }
 
-        console.log("");
+        blank();
       } catch (err) {
-        spinner.stop();
         out.error(err instanceof Error ? err.message : "Unknown error");
         process.exit(1);
       }
