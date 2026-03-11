@@ -14,7 +14,6 @@ import * as prompts from "@clack/prompts";
 import { readFileSync } from "node:fs";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
-import { GLYPH } from "../ui/theme.js";
 import { createRailSpinner, stepComplete, blank } from "../ui/format.js";
 import { sectionHeader } from "../ui/detail.js";
 import {
