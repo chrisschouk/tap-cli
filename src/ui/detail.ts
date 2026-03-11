@@ -5,7 +5,7 @@
  */
 
 import chalk from "chalk";
-import { GLYPH, COLOUR } from "./theme.js";
+import { GLYPH, WARMTH_COLOUR } from "./theme.js";
 
 const LABEL_WIDTH = 18;
 
@@ -119,14 +119,9 @@ export function percentage(n: number | null | undefined): string {
  * Colour-coded warmth label.
  */
 export function warmthColour(level: string | null | undefined): (s: string) => string {
-  const colours: Record<string, (s: string) => string> = {
-    hot: chalk.red,
-    warm: chalk.yellow,
-    neutral: chalk.white,
-    cold: chalk.blue,
-    over_pitched: chalk.hex(COLOUR.warning),
-  };
-  return colours[level || ""] || chalk.dim;
+  const hex = WARMTH_COLOUR[level || ""];
+  if (!hex) return chalk.dim;
+  return chalk.hex(hex);
 }
 
 /**

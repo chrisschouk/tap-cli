@@ -4,12 +4,15 @@
  * Matches TAP's visual palette. Same pattern as sink-cli/src/ui/theme.ts.
  */
 
+import chalk from "chalk";
+
 // -- Status glyphs -----------------------------------------------------------
 export const GLYPH = {
   check: "\u2713", // ✓
   cross: "\u2717", // ✗
   tilde: "~",
   diamond: "\u25C7", // ◇
+  diamondFilled: "\u25C6", // ◆
   bar: "\u2502", // │
   dot: "\u00B7", // ·
   arrow: "\u2192", // →
@@ -30,3 +33,33 @@ export const COLOUR = {
   white: "#f9fafb", // gray-50
   secondary: "#b45309", // amber-700 (TAP Pro accent)
 } as const;
+
+// -- Pre-coloured glyphs -----------------------------------------------------
+export const CHECK = chalk.hex(COLOUR.success)(GLYPH.check);
+export const CROSS = chalk.hex(COLOUR.danger)(GLYPH.cross);
+export const WARN = chalk.hex(COLOUR.warning)("!");
+export const INFO = chalk.hex(COLOUR.primary)(GLYPH.diamond);
+
+// -- Semantic colour maps -----------------------------------------------------
+export const WARMTH_COLOUR: Record<string, string> = {
+  hot: "#ef4444",
+  warm: "#f97316",
+  neutral: "#6b7280",
+  cold: "#3b82f6",
+  over_pitched: "#eab308",
+};
+
+export const CONFIDENCE_COLOUR: Record<string, string> = {
+  High: "#22c55e",
+  Medium: "#eab308",
+  Low: "#ef4444",
+};
+
+export const PITCH_STATUS_COLOUR: Record<string, string> = {
+  not_pitched: COLOUR.dimmed,
+  sent: COLOUR.primary,
+  opened: "#3b82f6",
+  replied: COLOUR.success,
+  declined: COLOUR.danger,
+  bounced: COLOUR.danger,
+};

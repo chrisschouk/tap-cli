@@ -4,7 +4,16 @@
 
 import chalk from "chalk";
 import ora, { type Ora } from "ora";
-import { GLYPH, COLOUR } from "./ui/theme.js";
+import {
+  GLYPH,
+  CHECK,
+  CROSS,
+  WARN,
+  INFO,
+  WARMTH_COLOUR,
+  CONFIDENCE_COLOUR,
+  PITCH_STATUS_COLOUR,
+} from "./ui/theme.js";
 
 /**
  * Create a spinner that writes to stderr so it doesn't pollute --json output.
@@ -22,15 +31,15 @@ export function table(headers: string[], rows: string[][]): void {
 
   // Print header
   const headerLine = headers.map((h, i) => h.padEnd(widths[i])).join("  ");
-  console.log(chalk.bold(headerLine));
-  console.log(chalk.dim(GLYPH.divider.repeat(headerLine.length)));
+  console.log(`  ${chalk.bold(headerLine)}`);
+  console.log(`  ${chalk.dim(GLYPH.divider.repeat(headerLine.length))}`);
 
   // Print rows
   for (const row of rows) {
     const line = row
       .map((cell, i) => (cell || "").padEnd(widths[i]))
       .join("  ");
-    console.log(line);
+    console.log(`  ${line}`);
   }
 }
 
@@ -39,19 +48,19 @@ export function json(data: unknown): void {
 }
 
 export function success(message: string): void {
-  console.log(chalk.green(GLYPH.check), message);
+  console.log(`  ${CHECK} ${message}`);
 }
 
 export function warn(message: string): void {
-  console.log(chalk.yellow("!"), message);
+  console.log(`  ${WARN} ${message}`);
 }
 
 export function error(message: string): void {
-  console.error(chalk.red(GLYPH.cross), message);
+  console.error(`  ${CROSS} ${message}`);
 }
 
 export function info(message: string): void {
-  console.log(chalk.hex(COLOUR.primary)("i"), message);
+  console.log(`  ${INFO} ${message}`);
 }
 
 export function statusBadge(status: string): string {
@@ -68,13 +77,9 @@ export function statusBadge(status: string): string {
 
 export function confidenceBadge(confidence: string | null): string {
   if (!confidence) return chalk.dim(GLYPH.divider);
-  const colours: Record<string, (s: string) => string> = {
-    High: chalk.green,
-    Medium: chalk.yellow,
-    Low: chalk.red,
-  };
-  const fn = colours[confidence] || chalk.white;
-  return fn(confidence);
+  const hex = CONFIDENCE_COLOUR[confidence];
+  if (!hex) return chalk.white(confidence);
+  return chalk.hex(hex)(confidence);
 }
 
 export function truncate(
@@ -88,27 +93,14 @@ export function truncate(
 
 export function warmthBadge(warmth: string | null | undefined): string {
   if (!warmth) return chalk.dim(GLYPH.divider);
-  const colours: Record<string, (s: string) => string> = {
-    hot: chalk.red,
-    warm: chalk.yellow,
-    neutral: chalk.white,
-    cold: chalk.blue,
-    over_pitched: chalk.hex(COLOUR.warning),
-  };
-  const fn = colours[warmth] || chalk.white;
-  return fn(warmth);
+  const hex = WARMTH_COLOUR[warmth];
+  if (!hex) return chalk.white(warmth);
+  return chalk.hex(hex)(warmth);
 }
 
 export function pitchStatusBadge(status: string | null | undefined): string {
   if (!status) return chalk.dim(GLYPH.divider);
-  const colours: Record<string, (s: string) => string> = {
-    not_pitched: chalk.dim,
-    sent: chalk.hex(COLOUR.primary),
-    opened: chalk.blue,
-    replied: chalk.green,
-    declined: chalk.red,
-    bounced: chalk.red,
-  };
-  const fn = colours[status] || chalk.white;
+  const hex = PITCH_STATUS_COLOUR[status];
+  const fn = hex ? chalk.hex(hex) : chalk.white;
   return fn(status.replace("_", " "));
 }
