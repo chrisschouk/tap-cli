@@ -26,6 +26,7 @@ import { outcomeCommand } from "./commands/outcome.js";
 import { pitchCommand } from "./commands/pitch.js";
 import { openCommand } from "./commands/open.js";
 import { sendCommand } from "./commands/send.js";
+import { discoverCommand } from "./commands/discover.js";
 import { intro } from "./ui/format.js";
 
 export const VERSION = "0.2.0";
@@ -47,6 +48,7 @@ export function buildProgram(): Command {
   program.addCommand(authCommand());
   program.addCommand(campaignsCommand());
   program.addCommand(contactsCommand());
+  program.addCommand(discoverCommand());
   program.addCommand(outcomeCommand());
   program.addCommand(pitchCommand());
   program.addCommand(openCommand());
