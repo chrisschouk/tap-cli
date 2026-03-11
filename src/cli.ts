@@ -27,6 +27,7 @@ import { pitchCommand } from "./commands/pitch.js";
 import { openCommand } from "./commands/open.js";
 import { sendCommand } from "./commands/send.js";
 import { discoverCommand } from "./commands/discover.js";
+import { watchCommand } from "./commands/watch.js";
 import { intro } from "./ui/format.js";
 
 export const VERSION = "0.2.0";
@@ -55,6 +56,7 @@ export function buildProgram(): Command {
   program.addCommand(queueCommand());
   program.addCommand(sendCommand());
   program.addCommand(statsCommand());
+  program.addCommand(watchCommand());
 
   return program;
 }
