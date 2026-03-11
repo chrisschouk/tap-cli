@@ -268,8 +268,9 @@ export function contactsCommand(): Command {
     .option("-g, --genre <genre>", "Genre filter")
     .option("--bbc", "Only BBC contacts")
     .option("--warm", "Only warm/hot contacts")
+    .option("--sort <field>", "Sort by: name, warmth, response, last-contacted", "name")
     .option("-w, --workspace <id>", "Workspace ID")
-    .option("-l, --limit <n>", "Max results", "30")
+    .option("-l, --limit <n>", "Max results", "50")
     .option("--json", "Output as JSON")
     .action(async (opts) => {
       const spinner = ora("Fetching contacts...").start();
@@ -278,31 +279,37 @@ export function contactsCommand(): Command {
         const supabase = getClient();
         const wsId = await resolveWorkspaceId(supabase, opts.workspace);
 
+        // Fetch contacts
         let query = supabase
           .from("tap_contacts")
           .select(
-            "id, name, email, outlet, role, genres, bbc_station, pipeline_status, enrichment_confidence",
+            "id, name, email, outlet, pipeline_status, enrichment_confidence, last_contacted_at",
             { count: "exact" },
           )
           .eq("workspace_id", wsId)
           .order("name", { ascending: true })
-          .limit(parseInt(opts.limit));
+          .limit(opts.warm ? 500 : parseInt(opts.limit));
 
         if (opts.status) query = query.eq("pipeline_status", opts.status);
         if (opts.genre) query = query.contains("genres", [opts.genre]);
         if (opts.bbc) query = query.not("bbc_station", "is", null);
 
-        const { data, count, error } = await query;
+        // Fetch metrics for warmth/response data
+        const [contactResult, metricsResult] = await Promise.all([
+          query,
+          supabase
+            .from("contact_relationship_metrics")
+            .select("contact_id, warmth_level, warmth_score, response_rate")
+            .eq("workspace_id", wsId),
+        ]);
+
         spinner.stop();
+
+        const { data, count, error } = contactResult;
 
         if (error) {
           out.error(error.message);
           process.exit(1);
-        }
-
-        if (opts.json) {
-          out.json({ contacts: data, total: count });
-          return;
         }
 
         if (!data || data.length === 0) {
@@ -310,18 +317,81 @@ export function contactsCommand(): Command {
           return;
         }
 
+        // Build metrics lookup
+        const metricsMap = new Map<string, { warmth_level: string | null; warmth_score: number | null; response_rate: number }>();
+        if (metricsResult.data) {
+          for (const m of metricsResult.data) {
+            metricsMap.set(m.contact_id, m);
+          }
+        }
+
+        // Merge contact + metrics
+        type ContactRow = {
+          id: string;
+          name: string | null;
+          email: string;
+          outlet: string | null;
+          pipeline_status: string | null;
+          enrichment_confidence: string | null;
+          last_contacted_at: string | null;
+          warmth_level: string | null;
+          warmth_score: number | null;
+          response_rate: number;
+        };
+
+        let merged: ContactRow[] = data.map((c) => {
+          const m = metricsMap.get(c.id);
+          return {
+            ...c,
+            warmth_level: m?.warmth_level || null,
+            warmth_score: m?.warmth_score || null,
+            response_rate: m?.response_rate || 0,
+          };
+        });
+
+        // Apply --warm filter
+        if (opts.warm) {
+          merged = merged.filter(
+            (c) => c.warmth_level === "hot" || c.warmth_level === "warm",
+          );
+        }
+
+        // Apply sort
+        const sortField = opts.sort;
+        if (sortField === "warmth") {
+          merged.sort((a, b) => (b.warmth_score ?? 0) - (a.warmth_score ?? 0));
+        } else if (sortField === "response") {
+          merged.sort((a, b) => b.response_rate - a.response_rate);
+        } else if (sortField === "last-contacted") {
+          merged.sort((a, b) => {
+            const aTime = a.last_contacted_at ? new Date(a.last_contacted_at).getTime() : 0;
+            const bTime = b.last_contacted_at ? new Date(b.last_contacted_at).getTime() : 0;
+            return bTime - aTime;
+          });
+        }
+
+        // Limit after filter/sort
+        const limited = merged.slice(0, parseInt(opts.limit));
+
+        if (opts.json) {
+          out.json({ contacts: limited, total: count });
+          return;
+        }
+
         out.table(
-          ["Name", "Email", "Outlet", "Status", "Confidence"],
-          data.map((c) => [
-            out.truncate(c.name, 25),
-            out.truncate(c.email, 30),
-            out.truncate(c.outlet, 20) || "\u2014",
+          ["Name", "Outlet", "Warmth", "Response", "Status", "Last Contact", "Confidence"],
+          limited.map((c) => [
+            out.truncate(c.name, 22),
+            out.truncate(c.outlet, 16) || "\u2014",
+            out.warmthBadge(c.warmth_level),
+            c.response_rate > 0 ? percentage(c.response_rate) : chalk.dim("\u2014"),
             c.pipeline_status || "new",
+            relativeDate(c.last_contacted_at),
             out.confidenceBadge(c.enrichment_confidence),
           ]),
         );
 
-        out.info(`${data.length} of ${count || 0} contacts`);
+        out.info(`${limited.length} of ${count || 0} contacts${opts.warm ? " (warm/hot only)" : ""}`);
       } catch (err) {
         spinner.stop();
         out.error(err instanceof Error ? err.message : "Unknown error");
