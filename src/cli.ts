@@ -27,6 +27,7 @@ import { pitchCommand } from "./commands/pitch.js";
 import { openCommand } from "./commands/open.js";
 import { sendCommand } from "./commands/send.js";
 import { discoverCommand } from "./commands/discover.js";
+import { importCommand } from "./commands/import.js";
 import { watchCommand } from "./commands/watch.js";
 import { intro } from "./ui/format.js";
 
@@ -50,6 +51,7 @@ export function buildProgram(): Command {
   program.addCommand(campaignsCommand());
   program.addCommand(contactsCommand());
   program.addCommand(discoverCommand());
+  program.addCommand(importCommand());
   program.addCommand(outcomeCommand());
   program.addCommand(pitchCommand());
   program.addCommand(openCommand());

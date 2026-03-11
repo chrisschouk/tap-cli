@@ -763,18 +763,5 @@ export function contactsCommand(): Command {
       }
     });
 
-  cmd
-    .command("import")
-    .description("Import contacts from CSV")
-    .argument("<file>", "CSV file path")
-    .option("-w, --workspace <id>", "Workspace ID")
-    .action(async (file, opts) => {
-      out.info(
-        `CSV import via CLI not yet implemented. Use the TAP web interface at tap.totalaudiopromo.com`,
-      );
-      out.info(`File: ${file}`);
-      if (opts.workspace) out.info(`Workspace: ${opts.workspace}`);
-    });
-
   return cmd;
 }
