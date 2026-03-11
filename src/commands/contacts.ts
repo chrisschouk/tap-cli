@@ -258,6 +258,185 @@ export async function showContact(
   }
 }
 
+/**
+ * Show cross-campaign timeline for a contact.
+ * Exported so interactive mode can call it directly.
+ */
+export async function showHistory(
+  contactId: string,
+  opts: { workspace?: string; limit?: string; json?: boolean },
+): Promise<void> {
+  const spinner = ora("Loading history...").start();
+
+  try {
+    const supabase = getClient();
+    const limit = parseInt(opts.limit || "50");
+
+    // Resolve email to ID
+    let resolvedId = contactId;
+    if (contactId.includes("@")) {
+      const wsId = await resolveWorkspaceId(supabase, opts.workspace);
+      const id = await resolveContactByEmail(supabase, wsId, contactId);
+      if (!id) {
+        spinner.stop();
+        out.error(`No contact found with email: ${contactId}`);
+        process.exit(1);
+      }
+      resolvedId = id;
+    }
+
+    // Parallel: contact name, outcomes, pitch drafts
+    const [contactResult, outcomesResult, draftsResult] = await Promise.all([
+      supabase
+        .from("tap_contacts")
+        .select("id, name, email, outlet")
+        .eq("id", resolvedId)
+        .single(),
+      supabase
+        .from("tap_contact_outcomes")
+        .select("id, outcome_type, notes, occurred_at, project_id")
+        .eq("contact_id", resolvedId)
+        .order("occurred_at", { ascending: false })
+        .limit(limit),
+      supabase
+        .from("campaign_pitch_drafts")
+        .select("id, subject, send_status, sent_at, campaign_id, created_at")
+        .eq("contact_id", resolvedId)
+        .order("created_at", { ascending: false })
+        .limit(limit),
+    ]);
+
+    if (contactResult.error || !contactResult.data) {
+      spinner.stop();
+      out.error(`Contact not found: ${contactId}`);
+      process.exit(1);
+    }
+
+    const contact = contactResult.data;
+    const outcomeData = outcomesResult.data || [];
+    const draftsData = draftsResult.data || [];
+
+    // Resolve project names
+    const projectIds = [
+      ...new Set([
+        ...outcomeData.map((o) => o.project_id).filter(Boolean),
+        ...draftsData.map((d) => d.campaign_id).filter(Boolean),
+      ]),
+    ];
+
+    let projectMap = new Map<string, { name: string; artist_name: string | null }>();
+    if (projectIds.length > 0) {
+      const { data: projects } = await supabase
+        .from("tap_projects")
+        .select("id, name, artist_name")
+        .in("id", projectIds);
+
+      if (projects) {
+        projectMap = new Map(projects.map((p) => [p.id, p]));
+      }
+    }
+
+    spinner.stop();
+
+    // Merge into unified timeline
+    interface TimelineEvent {
+      date: string;
+      type: string;
+      campaign: string;
+      detail: string | null;
+    }
+
+    const events: TimelineEvent[] = [];
+
+    for (const o of outcomeData) {
+      const project = o.project_id ? projectMap.get(o.project_id) : null;
+      const campaign = project
+        ? project.artist_name
+          ? `${project.artist_name} -- ${project.name}`
+          : project.name
+        : "";
+      events.push({
+        date: o.occurred_at || "",
+        type: o.outcome_type,
+        campaign,
+        detail: o.notes,
+      });
+    }
+
+    for (const d of draftsData) {
+      if (d.send_status === "sent" && d.sent_at) {
+        const project = d.campaign_id ? projectMap.get(d.campaign_id) : null;
+        const campaign = project
+          ? project.artist_name
+            ? `${project.artist_name} -- ${project.name}`
+            : project.name
+          : "";
+        events.push({
+          date: d.sent_at,
+          type: "pitched",
+          campaign,
+          detail: d.subject ? `Subject: ${d.subject}` : null,
+        });
+      }
+    }
+
+    // Sort by date descending
+    events.sort((a, b) => {
+      const aTime = a.date ? new Date(a.date).getTime() : 0;
+      const bTime = b.date ? new Date(b.date).getTime() : 0;
+      return bTime - aTime;
+    });
+
+    const limited = events.slice(0, limit);
+
+    if (opts.json) {
+      out.json({ contact, events: limited });
+      return;
+    }
+
+    // Header
+    console.log("");
+    console.log(
+      `  ${chalk.bold(contact.name || contact.email)}${contact.outlet ? chalk.dim(` -- ${contact.outlet}`) : ""}`,
+    );
+    console.log(`  ${chalk.dim(`Timeline (${limited.length} events)`)}`);
+    console.log(chalk.dim(`  ${"\u2500".repeat(44)}`));
+    console.log("");
+
+    if (limited.length === 0) {
+      out.info("No history found for this contact");
+    } else {
+      // Unique campaigns for summary
+      const uniqueCampaigns = new Set(limited.map((e) => e.campaign).filter(Boolean));
+
+      for (const e of limited) {
+        const dateStr = shortDate(e.date);
+        console.log(
+          `  ${dateStr.padEnd(8)}${out.pitchStatusBadge(e.type)?.padEnd(14)}  ${chalk.dim(out.truncate(e.campaign, 30) || "")}`,
+        );
+        if (e.detail) {
+          console.log(`           ${chalk.dim(out.truncate(e.detail, 50))}`);
+        }
+      }
+
+      console.log(chalk.dim(`  ${"\u2500".repeat(44)}`));
+      console.log(
+        chalk.dim(`  ${limited.length} events across ${uniqueCampaigns.size} campaign${uniqueCampaigns.size === 1 ? "" : "s"}`),
+      );
+    }
+
+    navHint([
+      `tap contacts show ${contact.id.slice(0, 8)}`,
+    ]);
+
+    console.log("");
+  } catch (err) {
+    spinner.stop();
+    out.error(err instanceof Error ? err.message : "Unknown error");
+    process.exit(1);
+  }
+}
+
 export function contactsCommand(): Command {
   const cmd = new Command("contacts").description("Manage contacts");
 
@@ -407,6 +586,17 @@ export function contactsCommand(): Command {
     .option("--json", "Output as JSON")
     .action(async (idOrEmail, opts) => {
       await showContact(idOrEmail, opts);
+    });
+
+  cmd
+    .command("history")
+    .description("Show cross-campaign timeline for a contact")
+    .argument("<id-or-email>", "Contact ID or email address")
+    .option("-w, --workspace <id>", "Workspace ID")
+    .option("-l, --limit <n>", "Max events", "50")
+    .option("--json", "Output as JSON")
+    .action(async (idOrEmail, opts) => {
+      await showHistory(idOrEmail, opts);
     });
 
   cmd
