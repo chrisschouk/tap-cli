@@ -62,22 +62,26 @@ export function outcomeCommand(): Command {
           process.exit(1);
         }
 
-        // Update campaign_contacts pitch_status if applicable
+        // Update statuses in parallel
+        const updates: PromiseLike<unknown>[] = [];
         if (statuses.pitchStatus) {
-          await supabase
-            .from("campaign_contacts")
-            .update({ pitch_status: statuses.pitchStatus })
-            .eq("project_id", campaignId)
-            .eq("contact_id", contactId);
+          updates.push(
+            supabase
+              .from("campaign_contacts")
+              .update({ pitch_status: statuses.pitchStatus })
+              .eq("project_id", campaignId)
+              .eq("contact_id", contactId),
+          );
         }
-
-        // Update tap_contacts pipeline_status if applicable
         if (statuses.pipelineStatus) {
-          await supabase
-            .from("tap_contacts")
-            .update({ pipeline_status: statuses.pipelineStatus })
-            .eq("id", contactId);
+          updates.push(
+            supabase
+              .from("tap_contacts")
+              .update({ pipeline_status: statuses.pipelineStatus })
+              .eq("id", contactId),
+          );
         }
+        if (updates.length > 0) await Promise.all(updates);
 
         spinner.stop();
 

@@ -29,13 +29,11 @@ import { intro } from "./ui/format.js";
 
 export const VERSION = "0.2.0";
 
-// Interactive mode: bare `tap` with no args
-const isInteractive = process.argv.length <= 2;
-
-if (isInteractive) {
-  // Dynamic import to avoid loading Commander for interactive
-  import("./ui/interactive.js").then(({ runInteractive }) => runInteractive());
-} else {
+/**
+ * Build the Commander program with all commands registered.
+ * Shared by both direct CLI invocation and interactive mode.
+ */
+export function buildProgram(): Command {
   const program = new Command();
 
   program
@@ -45,12 +43,6 @@ if (isInteractive) {
     )
     .version(VERSION, "-v, --version");
 
-  // Show logo on --version
-  program.on("option:version", () => {
-    intro(VERSION);
-    process.exit(0);
-  });
-
   program.addCommand(authCommand());
   program.addCommand(campaignsCommand());
   program.addCommand(contactsCommand());
@@ -59,6 +51,24 @@ if (isInteractive) {
   program.addCommand(openCommand());
   program.addCommand(queueCommand());
   program.addCommand(statsCommand());
+
+  return program;
+}
+
+// Interactive mode: bare `tap` with no args
+const isInteractive = process.argv.length <= 2;
+
+if (isInteractive) {
+  // Dynamic import to avoid loading Commander for interactive
+  import("./ui/interactive.js").then(({ runInteractive }) => runInteractive());
+} else {
+  const program = buildProgram();
+
+  // Show logo on --version
+  program.on("option:version", () => {
+    intro(VERSION);
+    process.exit(0);
+  });
 
   program.parse();
 }

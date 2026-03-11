@@ -134,21 +134,45 @@ export async function gatherPitchContext(
   if (!campaign) throw new Error(`Campaign not found: ${campaignId}`);
   if (!contact) throw new Error(`Contact not found: ${contactId}`);
 
-  // Count previous pitches to this contact across all campaigns
-  const { count: pitchCount } = await supabase
-    .from("campaign_contacts")
-    .select("contact_id", { count: "exact", head: true })
-    .eq("contact_id", contactId)
-    .not("pitch_status", "eq", "not_pitched");
-
-  // Get previous campaign names for this contact
-  const { data: prevCampaigns } = await supabase
-    .from("campaign_contacts")
-    .select("project_id, tap_projects(name)")
-    .eq("contact_id", contactId)
-    .not("project_id", "eq", campaignId)
-    .not("pitch_status", "eq", "not_pitched")
-    .limit(5);
+  // Fetch remaining context in parallel (none depend on each other)
+  const [
+    { count: pitchCount },
+    { data: prevCampaigns },
+    { data: voiceData },
+    { data: pressRelease },
+  ] = await Promise.all([
+    // Count previous pitches to this contact across all campaigns
+    supabase
+      .from("campaign_contacts")
+      .select("contact_id", { count: "exact", head: true })
+      .eq("contact_id", contactId)
+      .not("pitch_status", "eq", "not_pitched"),
+    // Get previous campaign names for this contact
+    supabase
+      .from("campaign_contacts")
+      .select("project_id, tap_projects(name)")
+      .eq("contact_id", contactId)
+      .not("project_id", "eq", campaignId)
+      .not("pitch_status", "eq", "not_pitched")
+      .limit(5),
+    // Fetch voice profile for workspace
+    supabase
+      .from("workspaces")
+      .select(
+        "voice_background, voice_style, voice_typical_opener, voice_approach, " +
+          "voice_differentiator, voice_achievements, voice_context_notes",
+      )
+      .eq("id", wsId)
+      .single(),
+    // Fetch press release if available
+    supabase
+      .from("campaign_assets")
+      .select("content")
+      .eq("project_id", campaignId)
+      .eq("type", "press_release")
+      .limit(1)
+      .maybeSingle(),
+  ]);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const previousCampaignNames =
@@ -161,16 +185,6 @@ export async function gatherPitchContext(
         return proj?.name as string;
       })
       .filter(Boolean) || [];
-
-  // Fetch voice profile for workspace
-  const { data: voiceData } = await supabase
-    .from("workspaces")
-    .select(
-      "voice_background, voice_style, voice_typical_opener, voice_approach, " +
-        "voice_differentiator, voice_achievements, voice_context_notes",
-    )
-    .eq("id", wsId)
-    .single();
 
   // Build past learnings from campaign memory
   const learningParts: string[] = [];
@@ -191,15 +205,6 @@ export async function gatherPitchContext(
     ? Date.now() - new Date(contact.enriched_at).getTime() >
       90 * 24 * 60 * 60 * 1000
     : false;
-
-  // Fetch press release if available (from campaign assets)
-  const { data: pressRelease } = await supabase
-    .from("campaign_assets")
-    .select("content")
-    .eq("project_id", campaignId)
-    .eq("type", "press_release")
-    .limit(1)
-    .maybeSingle();
 
   return {
     campaignName: campaign.name,

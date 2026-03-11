@@ -27,7 +27,11 @@ interface TapConfig {
   anthropicKey?: string;
 }
 
+let _cachedConfig: TapConfig | null | undefined;
+
 export function loadConfig(): TapConfig | null {
+  if (_cachedConfig !== undefined) return _cachedConfig;
+
   // Check env vars first
   const envUrl = process.env.SUPABASE_URL || process.env.TAP_SUPABASE_URL;
   const envKey =
@@ -36,26 +40,33 @@ export function loadConfig(): TapConfig | null {
     process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (envUrl && envKey) {
-    return {
+    _cachedConfig = {
       supabaseUrl: envUrl,
       supabaseKey: envKey,
       workspaceId: process.env.TAP_WORKSPACE_ID,
       anthropicKey: process.env.ANTHROPIC_API_KEY,
     };
+    return _cachedConfig;
   }
 
   // Fall back to config file
-  if (!existsSync(CONFIG_FILE)) return null;
+  if (!existsSync(CONFIG_FILE)) {
+    _cachedConfig = null;
+    return null;
+  }
 
   try {
     const raw = readFileSync(CONFIG_FILE, "utf-8");
-    return JSON.parse(raw) as TapConfig;
+    _cachedConfig = JSON.parse(raw) as TapConfig;
+    return _cachedConfig;
   } catch {
+    _cachedConfig = null;
     return null;
   }
 }
 
 export function saveConfig(config: TapConfig): void {
+  _cachedConfig = undefined; // Invalidate cache on save
   if (!existsSync(CONFIG_DIR)) {
     mkdirSync(CONFIG_DIR, { recursive: true });
   }

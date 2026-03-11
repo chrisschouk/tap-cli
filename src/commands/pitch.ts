@@ -14,7 +14,7 @@ import * as prompts from "@clack/prompts";
 import { getClient, resolveWorkspaceId, getAnthropicKey } from "../auth.js";
 import * as out from "../output.js";
 import { GLYPH, COLOUR } from "../ui/theme.js";
-import { createRailSpinner } from "../ui/format.js";
+import { createRailSpinner, divider } from "../ui/format.js";
 import {
   gatherPitchContext,
   getUnpitchedContacts,
@@ -95,7 +95,7 @@ export function pitchCommand(): Command {
         if (opts.dryRun) {
           console.log("");
           console.log(chalk.bold("  Pitch Context"));
-          console.log(chalk.dim(`  ${GLYPH.divider.repeat(40)}`));
+          divider();
           console.log(`  ${chalk.dim("Campaign")}   ${ctx.campaignName}`);
           console.log(`  ${chalk.dim("Artist")}     ${ctx.artistName}`);
           console.log(`  ${chalk.dim("Release")}    ${ctx.releaseName}`);
@@ -285,7 +285,7 @@ export function pitchCommand(): Command {
 
           for (const variant of variants) {
             if (!variant.body) continue;
-            console.log(chalk.dim(`  ${GLYPH.divider.repeat(40)}`));
+            divider();
             console.log(`  ${chalk.hex(COLOUR.primary)(variant.label)}`);
             console.log("");
             // Print body without colour codes so it's copy-pasteable
@@ -295,7 +295,7 @@ export function pitchCommand(): Command {
             console.log("");
           }
         } else {
-          console.log(chalk.dim(`  ${GLYPH.divider.repeat(40)}`));
+          divider();
           for (const line of result.body.split("\n")) {
             console.log(`  ${line}`);
           }

@@ -28,14 +28,3 @@ export const COLOUR = {
   white: "#f9fafb", // gray-50
   secondary: "#b45309", // amber-700 (TAP Pro accent)
 } as const;
-
-// -- Formatting helpers -------------------------------------------------------
-export function padRight(str: string, len: number): string {
-  if (str.length >= len) return str.slice(0, len);
-  return str + " ".repeat(len - str.length);
-}
-
-export function padLeft(str: string, len: number): string {
-  if (str.length >= len) return str.slice(0, len);
-  return " ".repeat(len - str.length) + str;
-}

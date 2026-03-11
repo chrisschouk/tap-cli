@@ -7,8 +7,7 @@
 import * as prompts from "@clack/prompts";
 import chalk from "chalk";
 import { intro, blank } from "./format.js";
-
-const VERSION = "0.2.0";
+import { VERSION } from "../cli.js";
 
 export async function runInteractive(): Promise<void> {
   intro(VERSION);
@@ -194,29 +193,10 @@ async function contactsMenu(): Promise<void> {
 async function runCommand(args: string[]): Promise<void> {
   blank();
   try {
-    const { Command } = await import("commander");
-    const { campaignsCommand } = await import("../commands/campaigns.js");
-    const { contactsCommand } = await import("../commands/contacts.js");
-    const { queueCommand } = await import("../commands/queue.js");
-    const { statsCommand } = await import("../commands/stats.js");
-    const { outcomeCommand } = await import("../commands/outcome.js");
-    const { pitchCommand } = await import("../commands/pitch.js");
-    const { openCommand } = await import("../commands/open.js");
-
-    const program = new Command();
+    const { buildProgram } = await import("../cli.js");
+    const program = buildProgram();
     program.exitOverride();
-    program.configureOutput({
-      writeErr: () => {},
-    });
-
-    program.addCommand(campaignsCommand());
-    program.addCommand(contactsCommand());
-    program.addCommand(outcomeCommand());
-    program.addCommand(pitchCommand());
-    program.addCommand(openCommand());
-    program.addCommand(queueCommand());
-    program.addCommand(statsCommand());
-
+    program.configureOutput({ writeErr: () => {} });
     await program.parseAsync(["node", "tap", ...args]);
   } catch {
     // Commander throws on exitOverride -- that's fine
