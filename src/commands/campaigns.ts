@@ -8,6 +8,242 @@ import chalk from "chalk";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
 import { GLYPH, COLOUR } from "../ui/theme.js";
+import { sectionHeader, sparkbar, shortDate, navHint } from "../ui/detail.js";
+
+/**
+ * Show full campaign detail view with health metrics and coverage.
+ * Exported so interactive mode can call it directly.
+ */
+export async function showCampaign(
+  id: string,
+  opts: { workspace?: string; json?: boolean },
+): Promise<void> {
+  const spinner = ora("Loading campaign...").start();
+
+  try {
+    const supabase = getClient();
+
+    // Fetch campaign + contacts + outcomes + coverage in parallel
+    const [campResult, contactsResult] = await Promise.all([
+      supabase
+        .from("tap_projects")
+        .select(
+          "id, name, artist_name, status, release_name, release_date, goal, created_at, momentum_score, momentum_trend",
+        )
+        .eq("id", id)
+        .single(),
+      supabase
+        .from("campaign_contacts")
+        .select("pitch_status, last_pitched_at, contact_id")
+        .eq("project_id", id),
+    ]);
+
+    if (campResult.error || !campResult.data) {
+      spinner.stop();
+      out.error(campResult.error?.message || `Campaign not found: ${id}`);
+      process.exit(1);
+    }
+
+    const campaign = campResult.data;
+    const contacts = contactsResult.data || [];
+    const contactIds = contacts.map((c) => c.contact_id);
+
+    // Second wave: outcomes, coverage, metrics (need contact IDs)
+    const [outcomesResult, coverageResult, metricsResult, contactNamesResult] =
+      await Promise.all([
+        supabase
+          .from("tap_contact_outcomes")
+          .select("outcome_type")
+          .eq("project_id", id),
+        supabase
+          .from("coverage_clips")
+          .select("id, title, type, url, publish_date, status")
+          .eq("campaign_id", id)
+          .order("publish_date", { ascending: false })
+          .limit(10),
+        contactIds.length > 0
+          ? supabase
+              .from("contact_relationship_metrics")
+              .select("contact_id, warmth_level, response_rate, avg_response_days")
+              .in("contact_id", contactIds)
+          : Promise.resolve({ data: [] as Array<{ contact_id: string; warmth_level: string | null; response_rate: number; avg_response_days: number | null }> }),
+        contactIds.length > 0
+          ? supabase
+              .from("tap_contacts")
+              .select("id, name, outlet")
+              .in("id", contactIds)
+          : Promise.resolve({ data: [] as Array<{ id: string; name: string | null; outlet: string | null }> }),
+      ]);
+
+    spinner.stop();
+
+    const outcomes = outcomesResult.data || [];
+    const coverageClips = coverageResult.data || [];
+    const metricsData = metricsResult.data || [];
+    const contactNames = contactNamesResult.data || [];
+
+    if (opts.json) {
+      out.json({ campaign, contacts, outcomes, coverage: coverageClips, metrics: metricsData });
+      return;
+    }
+
+    // -- Header --
+    console.log("");
+    console.log(
+      `  ${chalk.bold(campaign.name)}  ${out.statusBadge(campaign.status)}`,
+    );
+    if (campaign.artist_name) {
+      console.log(`  ${chalk.dim("Artist")}  ${campaign.artist_name}`);
+    }
+    if (campaign.release_name) {
+      console.log(`  ${chalk.dim("Release")} ${campaign.release_name}`);
+    }
+    if (campaign.release_date) {
+      const d = new Date(campaign.release_date).toLocaleDateString("en-GB", {
+        day: "numeric",
+        month: "long",
+        year: "numeric",
+      });
+      console.log(`  ${chalk.dim("Date")}    ${d}`);
+    }
+    if (campaign.goal) {
+      console.log(`  ${chalk.dim("Goal")}    ${campaign.goal}`);
+    }
+
+    // -- Contact table --
+    if (contacts.length > 0) {
+      const contactMap = new Map(contactNames.map((c) => [c.id, c]));
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rows = contacts
+        .map((c) => {
+          const contact = contactMap.get(c.contact_id);
+          return [
+            out.truncate(contact?.name || c.contact_id.slice(0, 8), 22),
+            out.truncate(contact?.outlet, 16) || "\u2014",
+            out.pitchStatusBadge(c.pitch_status),
+            shortDate(c.last_pitched_at),
+          ];
+        });
+
+      console.log("");
+      out.table(["Name", "Outlet", "Pitch Status", "Last Pitched"], rows);
+    }
+
+    // -- Health --
+    const total = contacts.length;
+    const pitched = contacts.filter(
+      (c) => c.pitch_status && c.pitch_status !== "not_pitched",
+    ).length;
+    const replied = contacts.filter(
+      (c) => c.pitch_status === "replied",
+    ).length;
+
+    const pctPitched = total > 0 ? Math.round((pitched / total) * 100) : 0;
+    const pctReplied = pitched > 0 ? Math.round((replied / pitched) * 100) : 0;
+
+    // Warmth breakdown
+    const warmthCounts: Record<string, number> = { hot: 0, warm: 0, neutral: 0, cold: 0 };
+    let totalResponseRate = 0;
+    let totalAvgDays = 0;
+    let avgDaysCount = 0;
+
+    for (const m of metricsData) {
+      if (m.warmth_level && warmthCounts[m.warmth_level] !== undefined) {
+        warmthCounts[m.warmth_level]++;
+      }
+      totalResponseRate += m.response_rate || 0;
+      if (m.avg_response_days !== null) {
+        totalAvgDays += m.avg_response_days;
+        avgDaysCount++;
+      }
+    }
+
+    sectionHeader("Health");
+    console.log(
+      `  ${chalk.dim("Contacts")} ${total}  ${chalk.dim(GLYPH.dot)}  ` +
+        `${chalk.dim("Pitched")} ${chalk.hex(COLOUR.primary)(`${pctPitched}%`)}  ${chalk.dim(GLYPH.dot)}  ` +
+        `${chalk.dim("Reply rate")} ${chalk.hex(COLOUR.success)(`${pctReplied}%`)}`,
+    );
+    if (metricsData.length > 0) {
+      const warmthParts = Object.entries(warmthCounts)
+        .filter(([, count]) => count > 0)
+        .map(([level, count]) => `${count} ${out.warmthBadge(level)}`);
+      if (warmthParts.length > 0) {
+        console.log(`  ${chalk.dim("Warmth")}   ${warmthParts.join(` ${chalk.dim(GLYPH.dot)} `)}`);
+      }
+      if (avgDaysCount > 0) {
+        console.log(
+          `  ${chalk.dim("Avg response")} ${(totalAvgDays / avgDaysCount).toFixed(1)} days`,
+        );
+      }
+    }
+
+    // -- Pitch Funnel --
+    const statusCounts: Record<string, number> = {};
+    for (const c of contacts) {
+      const status = c.pitch_status || "not_pitched";
+      statusCounts[status] = (statusCounts[status] || 0) + 1;
+    }
+
+    if (Object.keys(statusCounts).length > 0) {
+      sectionHeader("Pitch Funnel");
+      const funnelOrder = ["not_pitched", "sent", "replied", "declined", "bounced"];
+      for (const status of funnelOrder) {
+        const count = statusCounts[status];
+        if (!count) continue;
+        const ratio = count / total;
+        console.log(
+          `  ${out.pitchStatusBadge(status)?.padEnd(16)}${sparkbar(ratio)}  ${String(count).padStart(4)}`,
+        );
+      }
+      // Any other statuses
+      for (const [status, count] of Object.entries(statusCounts)) {
+        if (funnelOrder.includes(status)) continue;
+        const ratio = count / total;
+        console.log(
+          `  ${out.pitchStatusBadge(status)?.padEnd(16)}${sparkbar(ratio)}  ${String(count).padStart(4)}`,
+        );
+      }
+    }
+
+    // -- Coverage --
+    if (coverageClips.length > 0) {
+      sectionHeader("Coverage", `${coverageClips.length}`);
+      for (const clip of coverageClips) {
+        console.log(
+          `  ${out.truncate(clip.title, 34)?.padEnd(34)}  ${chalk.dim(clip.type?.padEnd(12) || "")}  ${shortDate(clip.publish_date)}`,
+        );
+        if (clip.url) {
+          console.log(`    ${chalk.dim(clip.url)}`);
+        }
+      }
+    }
+
+    // -- Outcome Distribution --
+    if (outcomes.length > 0) {
+      const outcomeDist: Record<string, number> = {};
+      for (const o of outcomes) {
+        outcomeDist[o.outcome_type] = (outcomeDist[o.outcome_type] || 0) + 1;
+      }
+      sectionHeader("Outcomes", `${outcomes.length}`);
+      const sorted = Object.entries(outcomeDist).sort(([, a], [, b]) => b - a);
+      for (const [type, count] of sorted) {
+        const ratio = count / outcomes.length;
+        console.log(
+          `  ${type.replace(/_/g, " ").padEnd(18)}${sparkbar(ratio)}  ${String(count).padStart(4)}`,
+        );
+      }
+    }
+
+    navHint([`tap open ${id.slice(0, 8)}`]);
+    console.log("");
+  } catch (err) {
+    spinner.stop();
+    out.error(err instanceof Error ? err.message : "Unknown error");
+    process.exit(1);
+  }
+}
 
 export function campaignsCommand(): Command {
   const cmd = new Command("campaigns").description("Manage campaigns");
@@ -78,139 +314,12 @@ export function campaignsCommand(): Command {
 
   cmd
     .command("show")
-    .description("Show campaign details with contacts")
+    .description("Show campaign details with health metrics and coverage")
     .argument("<id>", "Campaign ID")
     .option("-w, --workspace <id>", "Workspace ID")
     .option("--json", "Output as JSON")
     .action(async (id, opts) => {
-      const spinner = ora("Loading campaign...").start();
-
-      try {
-        const supabase = getClient();
-
-        // Fetch campaign
-        const { data: campaign, error: campErr } = await supabase
-          .from("tap_projects")
-          .select(
-            "id, name, artist_name, status, release_name, release_date, goal, created_at",
-          )
-          .eq("id", id)
-          .single();
-
-        if (campErr || !campaign) {
-          spinner.stop();
-          out.error(campErr?.message || `Campaign not found: ${id}`);
-          process.exit(1);
-        }
-
-        // Fetch campaign contacts with contact details
-        const { data: contacts, error: contactErr } = await supabase
-          .from("campaign_contacts")
-          .select(
-            "pitch_status, last_pitched_at, contact_id, tap_contacts(id, name, email, outlet, warmth, engagement_score)",
-          )
-          .eq("project_id", id)
-          .order("last_pitched_at", { ascending: false, nullsFirst: false });
-
-        spinner.stop();
-
-        if (contactErr) {
-          out.error(contactErr.message);
-          process.exit(1);
-        }
-
-        if (opts.json) {
-          out.json({ campaign, contacts });
-          return;
-        }
-
-        // Campaign header
-        console.log("");
-        console.log(
-          `  ${chalk.bold(campaign.name)}  ${out.statusBadge(campaign.status)}`,
-        );
-        if (campaign.artist_name) {
-          console.log(`  ${chalk.dim("Artist")}  ${campaign.artist_name}`);
-        }
-        if (campaign.release_name) {
-          console.log(`  ${chalk.dim("Release")} ${campaign.release_name}`);
-        }
-        if (campaign.release_date) {
-          const d = new Date(campaign.release_date).toLocaleDateString(
-            "en-GB",
-            {
-              day: "numeric",
-              month: "long",
-              year: "numeric",
-            },
-          );
-          console.log(`  ${chalk.dim("Date")}    ${d}`);
-        }
-        if (campaign.goal) {
-          console.log(`  ${chalk.dim("Goal")}    ${campaign.goal}`);
-        }
-        console.log("");
-
-        if (!contacts || contacts.length === 0) {
-          out.info("No contacts assigned to this campaign");
-          return;
-        }
-
-        // Contact table
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const rows = (contacts as any[])
-          .filter((c: any) => c.tap_contacts) // eslint-disable-line @typescript-eslint/no-explicit-any
-          .map((c: any) => {
-            // eslint-disable-line @typescript-eslint/no-explicit-any
-            const contact = Array.isArray(c.tap_contacts)
-              ? c.tap_contacts[0]
-              : c.tap_contacts;
-            const lastPitched = c.last_pitched_at
-              ? new Date(c.last_pitched_at).toLocaleDateString("en-GB")
-              : "\u2014";
-            const engagement = contact.engagement_score
-              ? `${contact.engagement_score}`
-              : "\u2014";
-
-            return [
-              out.truncate(contact.name, 22),
-              out.truncate(contact.outlet, 18) || "\u2014",
-              out.pitchStatusBadge(c.pitch_status),
-              lastPitched,
-              engagement,
-            ];
-          });
-
-        out.table(
-          ["Name", "Outlet", "Pitch Status", "Last Pitched", "Engagement"],
-          rows,
-        );
-        console.log("");
-
-        // Summary stats
-        const total = contacts.length;
-        const pitched = contacts.filter(
-          (c) => c.pitch_status && c.pitch_status !== "not_pitched",
-        ).length;
-        const replied = contacts.filter(
-          (c) => c.pitch_status === "replied",
-        ).length;
-
-        const pctPitched = total > 0 ? Math.round((pitched / total) * 100) : 0;
-        const pctReplied =
-          pitched > 0 ? Math.round((replied / pitched) * 100) : 0;
-
-        console.log(
-          `  ${chalk.dim("Contacts")} ${total}  ${chalk.dim(GLYPH.dot)}  ` +
-            `${chalk.dim("Pitched")} ${chalk.hex(COLOUR.primary)(`${pctPitched}%`)}  ${chalk.dim(GLYPH.dot)}  ` +
-            `${chalk.dim("Reply rate")} ${chalk.hex(COLOUR.success)(`${pctReplied}%`)}`,
-        );
-        console.log("");
-      } catch (err) {
-        spinner.stop();
-        out.error(err instanceof Error ? err.message : "Unknown error");
-        process.exit(1);
-      }
+      await showCampaign(id, opts);
     });
 
   cmd
