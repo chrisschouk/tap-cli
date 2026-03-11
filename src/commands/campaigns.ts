@@ -285,32 +285,80 @@ export function campaignsCommand(): Command {
         if (opts.status) query = query.eq("status", opts.status);
 
         const { data, error } = await query;
-        spinner.stop();
 
         if (error) {
+          spinner.stop();
           out.error(error.message);
           process.exit(1);
         }
 
         if (opts.json) {
+          spinner.stop();
           out.json(data);
           return;
         }
 
         if (!data || data.length === 0) {
+          spinner.stop();
           out.info("No campaigns found");
           return;
         }
 
+        // Batch-fetch warmth breakdown per campaign
+        const campaignIds = data.map((c) => c.id);
+        const [ccResult, metricsResult] = await Promise.all([
+          supabase
+            .from("campaign_contacts")
+            .select("project_id, contact_id")
+            .in("project_id", campaignIds),
+          supabase
+            .from("contact_relationship_metrics")
+            .select("contact_id, warmth_level")
+            .eq("workspace_id", wsId),
+        ]);
+
+        spinner.stop();
+
+        // Build per-campaign warmth counts
+        const warmthMap = new Map<string, string>();
+        if (metricsResult.data) {
+          for (const m of metricsResult.data) {
+            if (m.warmth_level) warmthMap.set(m.contact_id, m.warmth_level);
+          }
+        }
+
+        const campaignWarmth = new Map<string, Record<string, number>>();
+        if (ccResult.data) {
+          for (const cc of ccResult.data) {
+            const w = warmthMap.get(cc.contact_id);
+            if (!w) continue;
+            const counts = campaignWarmth.get(cc.project_id) || { hot: 0, warm: 0, neutral: 0, cold: 0 };
+            counts[w] = (counts[w] || 0) + 1;
+            campaignWarmth.set(cc.project_id, counts);
+          }
+        }
+
         out.table(
-          ["Name", "Artist", "Status", "Release", "Created"],
-          data.map((c) => [
-            out.truncate(c.name, 30),
-            out.truncate(c.artist_name, 20) || "\u2014",
-            out.statusBadge(c.status),
-            c.release_date || "\u2014",
-            new Date(c.created_at).toLocaleDateString("en-GB"),
-          ]),
+          ["Name", "Artist", "Status", "Release", "Warmth"],
+          data.map((c) => {
+            const counts = campaignWarmth.get(c.id);
+            let warmthCol = chalk.dim("\u2014");
+            if (counts) {
+              const parts: string[] = [];
+              if (counts.hot) parts.push(chalk.hex("#ef4444")(`${counts.hot}h`));
+              if (counts.warm) parts.push(chalk.hex("#f97316")(`${counts.warm}w`));
+              if (counts.neutral) parts.push(chalk.hex("#6b7280")(`${counts.neutral}n`));
+              if (counts.cold) parts.push(chalk.hex("#3b82f6")(`${counts.cold}c`));
+              warmthCol = parts.length > 0 ? parts.join(" ") : chalk.dim("\u2014");
+            }
+            return [
+              out.truncate(c.name, 28),
+              out.truncate(c.artist_name, 18) || "\u2014",
+              out.statusBadge(c.status),
+              c.release_date || "\u2014",
+              warmthCol,
+            ];
+          }),
         );
 
         out.info(`${data.length} campaigns`);

@@ -613,19 +613,27 @@ export function contactsCommand(): Command {
         const wsId = await resolveWorkspaceId(supabase, opts.workspace);
         const q = query.replace(/'/g, "''");
 
-        const { data, error } = await supabase
-          .from("tap_contacts")
-          .select(
-            "id, name, email, outlet, role, bbc_station, enrichment_confidence",
-          )
-          .eq("workspace_id", wsId)
-          .or(
-            `name.ilike.%${q}%,email.ilike.%${q}%,outlet.ilike.%${q}%,bbc_station.ilike.%${q}%`,
-          )
-          .order("name", { ascending: true })
-          .limit(20);
+        const [searchResult, metricsResult] = await Promise.all([
+          supabase
+            .from("tap_contacts")
+            .select(
+              "id, name, email, outlet, role, bbc_station, enrichment_confidence",
+            )
+            .eq("workspace_id", wsId)
+            .or(
+              `name.ilike.%${q}%,email.ilike.%${q}%,outlet.ilike.%${q}%,bbc_station.ilike.%${q}%`,
+            )
+            .order("name", { ascending: true })
+            .limit(20),
+          supabase
+            .from("contact_relationship_metrics")
+            .select("contact_id, warmth_level")
+            .eq("workspace_id", wsId),
+        ]);
 
         spinner.stop();
+
+        const { data, error } = searchResult;
 
         if (error) {
           out.error(error.message);
@@ -642,13 +650,21 @@ export function contactsCommand(): Command {
           return;
         }
 
+        // Build warmth lookup
+        const warmthMap = new Map<string, string>();
+        if (metricsResult.data) {
+          for (const m of metricsResult.data) {
+            if (m.warmth_level) warmthMap.set(m.contact_id, m.warmth_level);
+          }
+        }
+
         out.table(
-          ["Name", "Email", "Outlet", "BBC", "Confidence"],
+          ["Name", "Email", "Outlet", "Warmth", "Confidence"],
           data.map((c) => [
-            out.truncate(c.name, 25),
-            out.truncate(c.email, 30),
-            out.truncate(c.outlet, 20) || "\u2014",
-            c.bbc_station || "\u2014",
+            out.truncate(c.name, 22),
+            out.truncate(c.email, 28),
+            out.truncate(c.outlet, 18) || "\u2014",
+            out.warmthBadge(warmthMap.get(c.id) || null),
             out.confidenceBadge(c.enrichment_confidence),
           ]),
         );

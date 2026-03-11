@@ -178,8 +178,37 @@ export function queueCommand(): Command {
             `  ${chalk.bold("Unpitched")} (${unpitchedCount})${" ".repeat(Math.max(1, 32 - String(unpitchedCount).length))}${chalk.yellow.bold("MEDIUM")}`,
           );
           console.log(chalk.dim(`  ${GLYPH.divider.repeat(44)}`));
+
+          // Fetch warmth for unpitched contacts
+          const { data: unpitchedContacts } = await supabase
+            .from("campaign_contacts")
+            .select("contact_id")
+            .in("project_id", campaignIds)
+            .eq("pitch_status", "not_pitched")
+            .limit(500);
+
+          let warmthHint = "";
+          if (unpitchedContacts && unpitchedContacts.length > 0) {
+            const unpitchedIds = [...new Set(unpitchedContacts.map((c) => c.contact_id))];
+            const { data: unpitchedMetrics } = await supabase
+              .from("contact_relationship_metrics")
+              .select("contact_id, warmth_level")
+              .in("contact_id", unpitchedIds);
+
+            if (unpitchedMetrics && unpitchedMetrics.length > 0) {
+              const hotCount = unpitchedMetrics.filter((m) => m.warmth_level === "hot").length;
+              const warmCount = unpitchedMetrics.filter((m) => m.warmth_level === "warm").length;
+              const parts: string[] = [];
+              if (hotCount) parts.push(chalk.hex("#ef4444")(`${hotCount} hot`));
+              if (warmCount) parts.push(chalk.hex("#f97316")(`${warmCount} warm`));
+              if (parts.length > 0) {
+                warmthHint = ` (${parts.join(", ")} ${chalk.dim("-- pitch these first")})`;
+              }
+            }
+          }
+
           console.log(
-            `  ${unpitchedCount} contacts not yet pitched across ${campaigns.length} campaign${campaigns.length === 1 ? "" : "s"}`,
+            `  ${unpitchedCount} unpitched across ${campaigns.length} campaign${campaigns.length === 1 ? "" : "s"}${warmthHint}`,
           );
         }
 
