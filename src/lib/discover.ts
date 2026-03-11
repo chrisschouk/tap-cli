@@ -130,11 +130,7 @@ function scoreConfidence(
   if (
     src.includes("linkedin") ||
     src.includes("twitter") ||
-    src.includes("x.com")
-  ) {
-    return "medium";
-  }
-  if (
+    src.includes("x.com") ||
     src.includes(".co.uk") ||
     src.includes(".com") ||
     src.includes("radio")
@@ -170,16 +166,16 @@ export async function deduplicateContacts(
     return { newContacts: discovered, existingContacts: [] };
   }
 
-  // Fetch existing contacts by email
+  // Fetch existing contacts by email (single query with IDs for metrics lookup)
   const { data: existing } = await supabase
     .from("tap_contacts")
-    .select("email, name, pipeline_status")
+    .select("id, name, email, pipeline_status")
     .eq("workspace_id", workspaceId)
     .in("email", emails);
 
   const existingEmails = new Set((existing || []).map((c) => c.email));
 
-  // Fetch metrics for existing
+  // Fetch metrics for existing contacts
   const existingWithMetrics: Array<{
     name: string;
     email: string;
@@ -189,33 +185,25 @@ export async function deduplicateContacts(
   }> = [];
 
   if (existing && existing.length > 0) {
-    const { data: contacts } = await supabase
-      .from("tap_contacts")
-      .select("id, name, email, pipeline_status")
-      .eq("workspace_id", workspaceId)
-      .in("email", emails);
+    const contactIds = existing.map((c) => c.id);
+    const { data: metrics } = await supabase
+      .from("contact_relationship_metrics")
+      .select("contact_id, warmth_level, response_rate")
+      .in("contact_id", contactIds);
 
-    if (contacts) {
-      const contactIds = contacts.map((c) => c.id);
-      const { data: metrics } = await supabase
-        .from("contact_relationship_metrics")
-        .select("contact_id, warmth_level, response_rate")
-        .in("contact_id", contactIds);
+    const metricsMap = new Map(
+      (metrics || []).map((m) => [m.contact_id, m]),
+    );
 
-      const metricsMap = new Map(
-        (metrics || []).map((m) => [m.contact_id, m]),
-      );
-
-      for (const c of contacts) {
-        const m = metricsMap.get(c.id);
-        existingWithMetrics.push({
-          name: c.name || c.email,
-          email: c.email,
-          warmth_level: m?.warmth_level || null,
-          pipeline_status: c.pipeline_status,
-          response_rate: m?.response_rate || 0,
-        });
-      }
+    for (const c of existing) {
+      const m = metricsMap.get(c.id);
+      existingWithMetrics.push({
+        name: c.name || c.email,
+        email: c.email,
+        warmth_level: m?.warmth_level || null,
+        pipeline_status: c.pipeline_status,
+        response_rate: m?.response_rate || 0,
+      });
     }
   }
 

@@ -14,7 +14,7 @@ import * as prompts from "@clack/prompts";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
 import { GLYPH } from "../ui/theme.js";
-import { relativeDate, warningBlock } from "../ui/detail.js";
+import { warningBlock } from "../ui/detail.js";
 import {
   getGmailConnection,
   ensureFreshToken,
@@ -188,11 +188,11 @@ export function sendCommand(): Command {
         // Preview body
         console.log("");
         console.log(`  ${chalk.dim("Preview:")}`);
-        const bodyLines = pitch.body.split("\n").slice(0, 5);
-        for (const line of bodyLines) {
+        const allBodyLines = pitch.body.split("\n");
+        for (const line of allBodyLines.slice(0, 5)) {
           console.log(`  ${line}`);
         }
-        if (pitch.body.split("\n").length > 5) {
+        if (allBodyLines.length > 5) {
           console.log(chalk.dim(`  [truncated at 5 lines]`));
         }
         console.log("");

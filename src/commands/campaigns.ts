@@ -114,7 +114,6 @@ export async function showCampaign(
     if (contacts.length > 0) {
       const contactMap = new Map(contactNames.map((c) => [c.id, c]));
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const rows = contacts
         .map((c) => {
           const contact = contactMap.get(c.contact_id);
@@ -144,7 +143,6 @@ export async function showCampaign(
 
     // Warmth breakdown
     const warmthCounts: Record<string, number> = { hot: 0, warm: 0, neutral: 0, cold: 0 };
-    let totalResponseRate = 0;
     let totalAvgDays = 0;
     let avgDaysCount = 0;
 
@@ -152,7 +150,6 @@ export async function showCampaign(
       if (m.warmth_level && warmthCounts[m.warmth_level] !== undefined) {
         warmthCounts[m.warmth_level]++;
       }
-      totalResponseRate += m.response_rate || 0;
       if (m.avg_response_days !== null) {
         totalAvgDays += m.avg_response_days;
         avgDaysCount++;

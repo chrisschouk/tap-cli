@@ -10,7 +10,7 @@ import chalk from "chalk";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
 import { GLYPH } from "../ui/theme.js";
-import { sectionHeader, relativeDate } from "../ui/detail.js";
+import { relativeDate } from "../ui/detail.js";
 
 export function queueCommand(): Command {
   return new Command("queue")

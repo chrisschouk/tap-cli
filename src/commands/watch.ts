@@ -15,14 +15,7 @@ import chalk from "chalk";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
 import { GLYPH, COLOUR } from "../ui/theme.js";
-import { relativeDate, sparkbar, percentage } from "../ui/detail.js";
-
-interface ActivityItem {
-  time: string;
-  type: string;
-  label: string;
-  isNew: boolean;
-}
+import { relativeDate } from "../ui/detail.js";
 
 export function watchCommand(): Command {
   return new Command("watch")
@@ -186,7 +179,7 @@ export function watchCommand(): Command {
 
             } else {
               // -- Workspace overview mode --
-              const [campaignsResult, outcomesResult, queueResult] =
+              const [campaignsResult, outcomesResult] =
                 await Promise.all([
                   supabase
                     .from("tap_projects")
@@ -200,10 +193,6 @@ export function watchCommand(): Command {
                     .gte("occurred_at", twoHoursAgo.toISOString())
                     .order("occurred_at", { ascending: false })
                     .limit(10),
-                  supabase
-                    .from("campaign_contacts")
-                    .select("pitch_status, project_id")
-                    .eq("pitch_status", "not_pitched"),
                 ]);
 
               const campaigns = campaignsResult.data || [];

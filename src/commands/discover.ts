@@ -166,7 +166,7 @@ export function discoverCommand(): Command {
           return;
         }
 
-        let toImport = importable;
+        const toImport = importable;
 
         if (!opts.import) {
           console.log("");

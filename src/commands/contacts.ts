@@ -164,12 +164,13 @@ export async function showContact(
           console.log(`${"".padEnd(20)}${chalk.dim(".")} ${tip}`);
         }
       }
+      const confidenceColours: Record<string, (s: string) => string> = {
+        High: chalk.green,
+        Medium: chalk.yellow,
+        Low: chalk.red,
+      };
       console.log(field("Confidence", contact.enrichment_confidence, {
-        colour: contact.enrichment_confidence === "High"
-          ? chalk.green
-          : contact.enrichment_confidence === "Medium"
-            ? chalk.yellow
-            : chalk.red,
+        colour: confidenceColours[contact.enrichment_confidence || ""] || chalk.red,
       }));
       console.log(field("Enriched", relativeDate(contact.enriched_at)));
     }

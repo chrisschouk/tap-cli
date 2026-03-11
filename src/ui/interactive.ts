@@ -17,7 +17,6 @@ import { showCampaign } from "../commands/campaigns.js";
 export async function runInteractive(): Promise<void> {
   intro(VERSION);
 
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     const action = (await prompts.select({
       message: "What would you like to do?",

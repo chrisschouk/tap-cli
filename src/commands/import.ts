@@ -16,9 +16,7 @@ import { readFileSync } from "node:fs";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
 import { GLYPH } from "../ui/theme.js";
-import { sectionHeader } from "../ui/detail.js";
 import {
-  type SinkRecord,
   type TapContactInsert,
   mapSinkRecordToContact,
   filterImportable,
@@ -120,7 +118,7 @@ export function importCommand(): Command {
         }
 
         // Detect format
-        let contacts: TapContactInsert[] = [];
+        const contacts: TapContactInsert[] = [];
         let sourceLabel = "";
         let totalRecords = 0;
         let skippedDuplicate = 0;
