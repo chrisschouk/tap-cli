@@ -11,7 +11,6 @@
  */
 
 import { Command } from "commander";
-import ora from "ora";
 import chalk from "chalk";
 import * as prompts from "@clack/prompts";
 import { getClient, resolveWorkspaceId, loadConfig } from "../auth.js";
@@ -63,7 +62,7 @@ export function discoverCommand(): Command {
 
       const searchTerm =
         query || opts.station || `${opts.genre || ""} ${opts.region || ""}`.trim();
-      const spinner = ora(
+      const spinner = out.spinner(
         `Discovering contacts for "${searchTerm}"...`,
       ).start();
 
@@ -181,7 +180,7 @@ export function discoverCommand(): Command {
         }
 
         // Batch insert
-        const insertSpinner = ora(
+        const insertSpinner = out.spinner(
           `Importing ${toImport.length} contacts...`,
         ).start();
 

@@ -3,7 +3,6 @@
  */
 
 import { Command } from "commander";
-import ora from "ora";
 import chalk from "chalk";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
@@ -18,7 +17,7 @@ export async function showCampaign(
   id: string,
   opts: { workspace?: string; json?: boolean },
 ): Promise<void> {
-  const spinner = ora("Loading campaign...").start();
+  const spinner = out.spinner("Loading campaign...");
 
   try {
     const supabase = getClient();
@@ -48,8 +47,29 @@ export async function showCampaign(
     const contacts = contactsResult.data || [];
     const contactIds = contacts.map((c) => c.contact_id);
 
-    // Second wave: outcomes, coverage, metrics (need contact IDs)
-    const [outcomesResult, coverageResult, metricsResult, contactNamesResult] =
+    // Batch helper for large IN queries (Supabase URL limit ~8000 chars)
+    async function batchIn<T>(
+      table: string,
+      select: string,
+      column: string,
+      ids: string[],
+      chunkSize = 200,
+    ): Promise<T[]> {
+      if (ids.length === 0) return [];
+      const results: T[] = [];
+      for (let i = 0; i < ids.length; i += chunkSize) {
+        const chunk = ids.slice(i, i + chunkSize);
+        const { data } = await supabase
+          .from(table)
+          .select(select)
+          .in(column, chunk);
+        if (data) results.push(...(data as T[]));
+      }
+      return results;
+    }
+
+    // Second wave: outcomes, coverage, metrics, names (need contact IDs)
+    const [outcomesResult, coverageResult, metricsData, contactNames] =
       await Promise.all([
         supabase
           .from("tap_contact_outcomes")
@@ -61,26 +81,18 @@ export async function showCampaign(
           .eq("campaign_id", id)
           .order("publish_date", { ascending: false })
           .limit(10),
-        contactIds.length > 0
-          ? supabase
-              .from("contact_relationship_metrics")
-              .select("contact_id, warmth_level, response_rate, avg_response_days")
-              .in("contact_id", contactIds)
-          : Promise.resolve({ data: [] as Array<{ contact_id: string; warmth_level: string | null; response_rate: number; avg_response_days: number | null }> }),
-        contactIds.length > 0
-          ? supabase
-              .from("tap_contacts")
-              .select("id, name, outlet")
-              .in("id", contactIds)
-          : Promise.resolve({ data: [] as Array<{ id: string; name: string | null; outlet: string | null }> }),
+        batchIn<{ contact_id: string; warmth_level: string | null; response_rate: number; avg_response_days: number | null }>(
+          "contact_relationship_metrics", "contact_id, warmth_level, response_rate, avg_response_days", "contact_id", contactIds,
+        ),
+        batchIn<{ id: string; name: string | null; outlet: string | null }>(
+          "tap_contacts", "id, name, outlet", "id", contactIds,
+        ),
       ]);
 
     spinner.stop();
 
     const outcomes = outcomesResult.data || [];
     const coverageClips = coverageResult.data || [];
-    const metricsData = metricsResult.data || [];
-    const contactNames = contactNamesResult.data || [];
 
     if (opts.json) {
       out.json({ campaign, contacts, outcomes, coverage: coverageClips, metrics: metricsData });
@@ -255,7 +267,7 @@ export function campaignsCommand(): Command {
     .option("-w, --workspace <id>", "Workspace ID")
     .option("--json", "Output as JSON")
     .action(async (opts) => {
-      const spinner = ora("Fetching campaigns...").start();
+      const spinner = out.spinner("Fetching campaigns...");
 
       try {
         const supabase = getClient();
@@ -332,7 +344,7 @@ export function campaignsCommand(): Command {
     )
     .option("-w, --workspace <id>", "Workspace ID")
     .action(async (opts) => {
-      const spinner = ora("Creating campaign...").start();
+      const spinner = out.spinner("Creating campaign...");
 
       try {
         const supabase = getClient();
@@ -390,7 +402,7 @@ export function campaignsCommand(): Command {
         process.exit(1);
       }
 
-      const spinner = ora("Updating status...").start();
+      const spinner = out.spinner("Updating status...");
 
       try {
         const supabase = getClient();

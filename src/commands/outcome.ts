@@ -8,7 +8,6 @@
  */
 
 import { Command } from "commander";
-import ora from "ora";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
 import {
@@ -35,7 +34,7 @@ export function outcomeCommand(): Command {
         process.exit(1);
       }
 
-      const spinner = ora("Logging outcome...").start();
+      const spinner = out.spinner("Logging outcome...").start();
 
       try {
         const supabase = getClient();

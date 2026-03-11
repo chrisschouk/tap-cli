@@ -3,7 +3,6 @@
  */
 
 import { Command } from "commander";
-import ora from "ora";
 import chalk from "chalk";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
@@ -36,7 +35,7 @@ export async function showContact(
   contactId: string,
   opts: { workspace?: string; json?: boolean },
 ): Promise<void> {
-  const spinner = ora("Loading contact...").start();
+  const spinner = out.spinner("Loading contact...").start();
 
   try {
     const supabase = getClient();
@@ -267,7 +266,7 @@ export async function showHistory(
   contactId: string,
   opts: { workspace?: string; limit?: string; json?: boolean },
 ): Promise<void> {
-  const spinner = ora("Loading history...").start();
+  const spinner = out.spinner("Loading history...").start();
 
   try {
     const supabase = getClient();
@@ -453,7 +452,7 @@ export function contactsCommand(): Command {
     .option("-l, --limit <n>", "Max results", "50")
     .option("--json", "Output as JSON")
     .action(async (opts) => {
-      const spinner = ora("Fetching contacts...").start();
+      const spinner = out.spinner("Fetching contacts...").start();
 
       try {
         const supabase = getClient();
@@ -607,7 +606,7 @@ export function contactsCommand(): Command {
     .option("-w, --workspace <id>", "Workspace ID")
     .option("--json", "Output as JSON")
     .action(async (query, opts) => {
-      const spinner = ora("Searching...").start();
+      const spinner = out.spinner("Searching...").start();
 
       try {
         const supabase = getClient();
@@ -681,7 +680,7 @@ export function contactsCommand(): Command {
     .option("-w, --workspace <id>", "Workspace ID")
     .option("--json", "Output as JSON")
     .action(async (opts) => {
-      const spinner = ora("Adding contact...").start();
+      const spinner = out.spinner("Adding contact...").start();
 
       try {
         const supabase = getClient();
@@ -739,7 +738,7 @@ export function contactsCommand(): Command {
     .description("Queue a contact for AI enrichment")
     .argument("<id>", "Contact ID")
     .action(async (id) => {
-      const spinner = ora("Queueing enrichment...").start();
+      const spinner = out.spinner("Queueing enrichment...").start();
 
       try {
         const supabase = getClient();

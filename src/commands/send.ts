@@ -8,7 +8,6 @@
  */
 
 import { Command } from "commander";
-import ora from "ora";
 import chalk from "chalk";
 import * as prompts from "@clack/prompts";
 import { getClient, resolveWorkspaceId } from "../auth.js";
@@ -34,7 +33,7 @@ export function sendCommand(): Command {
     .option("--dry-run", "Preview without sending")
     .option("--json", "Structured output with message ID")
     .action(async (pitchId, opts) => {
-      const spinner = ora("Loading pitch...").start();
+      const spinner = out.spinner("Loading pitch...").start();
 
       try {
         const supabase = getClient();
@@ -223,7 +222,7 @@ export function sendCommand(): Command {
         }
 
         // Send
-        const sendSpinner = ora("Sending via Gmail...").start();
+        const sendSpinner = out.spinner("Sending via Gmail...").start();
 
         const accessToken = await ensureFreshToken(supabase, gmailConn!);
         const rawMessage = buildRawMessage(

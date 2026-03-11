@@ -9,7 +9,6 @@
  */
 
 import { Command } from "commander";
-import ora from "ora";
 import chalk from "chalk";
 import * as prompts from "@clack/prompts";
 import { readFileSync } from "node:fs";
@@ -103,7 +102,7 @@ export function importCommand(): Command {
         process.exit(1);
       }
 
-      const spinner = ora("Reading input...").start();
+      const spinner = out.spinner("Reading input...").start();
 
       try {
         const supabase = getClient();
@@ -308,7 +307,7 @@ export function importCommand(): Command {
         }
 
         // Batch insert
-        const importSpinner = ora(
+        const importSpinner = out.spinner(
           `Importing ${newContacts.length} contacts...`,
         ).start();
 

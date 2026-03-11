@@ -3,7 +3,15 @@
  */
 
 import chalk from "chalk";
+import ora, { type Ora } from "ora";
 import { GLYPH, COLOUR } from "./ui/theme.js";
+
+/**
+ * Create a spinner that writes to stderr so it doesn't pollute --json output.
+ */
+export function spinner(text: string): Ora {
+  return ora({ text, stream: process.stderr }).start();
+}
 
 export function table(headers: string[], rows: string[][]): void {
   // Calculate column widths

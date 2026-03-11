@@ -6,7 +6,6 @@
  */
 
 import { Command } from "commander";
-import ora from "ora";
 import chalk from "chalk";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
@@ -18,7 +17,7 @@ export function statsCommand(): Command {
     .option("-w, --workspace <id>", "Workspace ID")
     .option("--json", "Output as JSON")
     .action(async (opts) => {
-      const spinner = ora("Loading stats...").start();
+      const spinner = out.spinner("Loading stats...").start();
 
       try {
         const supabase = getClient();
