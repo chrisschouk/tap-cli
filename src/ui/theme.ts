@@ -14,6 +14,8 @@ export const GLYPH = {
   dot: "\u00B7", // ·
   arrow: "\u2192", // →
   divider: "\u2500", // ─
+  blockFull: "\u2588", // █
+  blockLight: "\u2591", // ░
 } as const;
 
 // -- Colour palette (hex) ----------------------------------------------------
