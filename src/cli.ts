@@ -25,6 +25,7 @@ import { authCommand } from "./commands/auth.js";
 import { outcomeCommand } from "./commands/outcome.js";
 import { pitchCommand } from "./commands/pitch.js";
 import { openCommand } from "./commands/open.js";
+import { sendCommand } from "./commands/send.js";
 import { intro } from "./ui/format.js";
 
 export const VERSION = "0.2.0";
@@ -50,6 +51,7 @@ export function buildProgram(): Command {
   program.addCommand(pitchCommand());
   program.addCommand(openCommand());
   program.addCommand(queueCommand());
+  program.addCommand(sendCommand());
   program.addCommand(statsCommand());
 
   return program;

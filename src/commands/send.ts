@@ -1,0 +1,309 @@
+/**
+ * Send command -- pitch-to-inbox pipeline from terminal.
+ *
+ * Usage:
+ *   tap send <pitch-id>              -- send a pitch draft via Gmail
+ *   tap send <pitch-id> --dry-run    -- preview without sending
+ *   tap send <pitch-id> --confirm    -- skip confirmation prompt
+ */
+
+import { Command } from "commander";
+import ora from "ora";
+import chalk from "chalk";
+import * as prompts from "@clack/prompts";
+import { getClient, resolveWorkspaceId } from "../auth.js";
+import * as out from "../output.js";
+import { GLYPH } from "../ui/theme.js";
+import { relativeDate, warningBlock } from "../ui/detail.js";
+import {
+  getGmailConnection,
+  ensureFreshToken,
+  buildRawMessage,
+  sendGmailMessage,
+  getDailySendCount,
+} from "../lib/gmail.js";
+
+const DAILY_SEND_CAP = 50;
+
+export function sendCommand(): Command {
+  return new Command("send")
+    .description("Send a pitch draft via Gmail")
+    .argument("<pitch-id>", "Pitch draft ID")
+    .option("-w, --workspace <id>", "Workspace ID")
+    .option("--confirm", "Skip confirmation prompt")
+    .option("--dry-run", "Preview without sending")
+    .option("--json", "Structured output with message ID")
+    .action(async (pitchId, opts) => {
+      const spinner = ora("Loading pitch...").start();
+
+      try {
+        const supabase = getClient();
+        const wsId = await resolveWorkspaceId(supabase, opts.workspace);
+
+        // Fetch pitch draft
+        const { data: pitch, error: pitchErr } = await supabase
+          .from("campaign_pitch_drafts")
+          .select(
+            "id, subject, body, campaign_id, contact_id, send_status, sent_at",
+          )
+          .eq("id", pitchId)
+          .single();
+
+        if (pitchErr || !pitch) {
+          spinner.stop();
+          out.error(pitchErr?.message || `Pitch not found: ${pitchId}`);
+          process.exit(1);
+        }
+
+        if (pitch.send_status === "sent") {
+          spinner.stop();
+          out.warn(`This pitch was already sent on ${pitch.sent_at ? new Date(pitch.sent_at).toLocaleDateString("en-GB") : "unknown date"}`);
+          process.exit(1);
+        }
+
+        // Resolve contact and campaign in parallel
+        const [contactResult, campaignResult, gmailConn, dailyCount] =
+          await Promise.all([
+            pitch.contact_id
+              ? supabase
+                  .from("tap_contacts")
+                  .select("id, name, email, outlet, last_contacted_at, total_pitches, cooling_off, pitch_embargo_until")
+                  .eq("id", pitch.contact_id)
+                  .single()
+              : Promise.resolve({ data: null, error: null }),
+            pitch.campaign_id
+              ? supabase
+                  .from("tap_projects")
+                  .select("id, name, artist_name")
+                  .eq("id", pitch.campaign_id)
+                  .single()
+              : Promise.resolve({ data: null, error: null }),
+            getGmailConnection(supabase, wsId),
+            getDailySendCount(supabase, wsId),
+          ]);
+
+        spinner.stop();
+
+        const contact = contactResult.data;
+        const campaign = campaignResult.data;
+
+        if (!contact?.email) {
+          out.error("No contact email associated with this pitch");
+          process.exit(1);
+        }
+
+        if (!gmailConn && !opts.dryRun) {
+          out.error(
+            "No Gmail connection found. Connect Gmail in TAP web first: tap.totalaudiopromo.com/settings/integrations",
+          );
+          process.exit(1);
+        }
+
+        if (dailyCount >= DAILY_SEND_CAP && !opts.dryRun) {
+          out.error(
+            `Daily send limit reached (${dailyCount}/${DAILY_SEND_CAP}). Try again tomorrow.`,
+          );
+          process.exit(1);
+        }
+
+        // Relationship warnings
+        const warnings: string[] = [];
+        if (contact.total_pitches && contact.total_pitches >= 3) {
+          // Check recent pitch frequency
+          const ninetyDaysAgo = new Date();
+          ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+          const { count: recentPitches } = await supabase
+            .from("campaign_contacts")
+            .select("id", { count: "exact", head: true })
+            .eq("contact_id", contact.id)
+            .not("last_pitched_at", "is", null)
+            .gte("last_pitched_at", ninetyDaysAgo.toISOString());
+
+          if (recentPitches && recentPitches >= 3) {
+            warnings.push(
+              `${contact.name || contact.email} was pitched ${recentPitches} times in the last 90 days`,
+            );
+          }
+        }
+
+        if (contact.cooling_off) {
+          warnings.push(`${contact.name || contact.email} is in a cooling off period`);
+        }
+
+        if (contact.pitch_embargo_until) {
+          const embargo = new Date(contact.pitch_embargo_until);
+          if (embargo > new Date()) {
+            warnings.push(
+              `Pitch embargo until ${embargo.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}`,
+            );
+          }
+        }
+
+        // Check for recent declined outcome
+        const { data: recentDeclined } = await supabase
+          .from("tap_contact_outcomes")
+          .select("occurred_at")
+          .eq("contact_id", contact.id)
+          .eq("outcome_type", "declined")
+          .order("occurred_at", { ascending: false })
+          .limit(1);
+
+        if (recentDeclined && recentDeclined.length > 0) {
+          const declinedDate = new Date(recentDeclined[0].occurred_at);
+          const daysSince = Math.floor(
+            (Date.now() - declinedDate.getTime()) / 86400000,
+          );
+          if (daysSince <= 14) {
+            warnings.push(
+              `Last pitch was declined ${daysSince} day${daysSince === 1 ? "" : "s"} ago`,
+            );
+          }
+        }
+
+        // Display
+        console.log("");
+        console.log(`  ${chalk.bold("Sending pitch...")}`);
+        console.log(chalk.dim(`  ${GLYPH.divider.repeat(44)}`));
+        console.log("");
+
+        console.log(
+          `  ${chalk.dim("To".padEnd(12))}${contact.name || ""} <${contact.email}>`,
+        );
+        console.log(
+          `  ${chalk.dim("Subject".padEnd(12))}${pitch.subject}`,
+        );
+        if (campaign) {
+          const campaignLabel = campaign.artist_name
+            ? `${campaign.artist_name} -- ${campaign.name}`
+            : campaign.name;
+          console.log(
+            `  ${chalk.dim("Campaign".padEnd(12))}${campaignLabel}`,
+          );
+        }
+
+        if (warnings.length > 0) {
+          warningBlock(warnings);
+        }
+
+        // Preview body
+        console.log("");
+        console.log(`  ${chalk.dim("Preview:")}`);
+        const bodyLines = pitch.body.split("\n").slice(0, 5);
+        for (const line of bodyLines) {
+          console.log(`  ${line}`);
+        }
+        if (pitch.body.split("\n").length > 5) {
+          console.log(chalk.dim(`  [truncated at 5 lines]`));
+        }
+        console.log("");
+
+        if (opts.dryRun) {
+          out.info("Dry run -- nothing sent");
+          if (opts.json) {
+            out.json({
+              dryRun: true,
+              to: contact.email,
+              subject: pitch.subject,
+              campaignId: pitch.campaign_id,
+              warnings,
+            });
+          }
+          return;
+        }
+
+        // Confirmation
+        if (!opts.confirm) {
+          const confirmed = await prompts.confirm({
+            message: "Send this pitch?",
+          });
+          if (prompts.isCancel(confirmed) || !confirmed) {
+            console.log(chalk.dim("  Cancelled."));
+            return;
+          }
+        }
+
+        // Send
+        const sendSpinner = ora("Sending via Gmail...").start();
+
+        const accessToken = await ensureFreshToken(supabase, gmailConn!);
+        const rawMessage = buildRawMessage(
+          contact.email,
+          pitch.subject,
+          pitch.body,
+          gmailConn!.email_address,
+        );
+        const { messageId, threadId } = await sendGmailMessage(
+          accessToken,
+          rawMessage,
+        );
+
+        // Update database
+        const now = new Date().toISOString();
+        await Promise.all([
+          // Update pitch draft
+          supabase
+            .from("campaign_pitch_drafts")
+            .update({
+              send_status: "sent",
+              sent_at: now,
+              gmail_message_id: messageId,
+              gmail_thread_id: threadId,
+              sent_via: "cli",
+            })
+            .eq("id", pitchId),
+          // Update campaign contact
+          pitch.contact_id && pitch.campaign_id
+            ? supabase
+                .from("campaign_contacts")
+                .update({
+                  pitch_status: "sent",
+                  last_pitched_at: now,
+                })
+                .eq("contact_id", pitch.contact_id)
+                .eq("project_id", pitch.campaign_id)
+            : Promise.resolve(),
+          // Log send
+          supabase.from("gmail_send_logs").insert({
+            workspace_id: wsId,
+            user_id: gmailConn!.id,
+            campaign_id: pitch.campaign_id,
+            contact_id: pitch.contact_id,
+            pitch_id: pitchId,
+            recipient_email: contact.email,
+            subject: pitch.subject,
+            gmail_message_id: messageId,
+            gmail_thread_id: threadId,
+            sent_at: now,
+          }),
+        ]);
+
+        sendSpinner.stop();
+
+        out.success(`Sent via Gmail (msg: ${messageId})`);
+        out.success("Pitch status updated to sent");
+
+        // Calculate follow-up date
+        const followUp = new Date();
+        followUp.setDate(followUp.getDate() + 5);
+        out.success(
+          `Next follow-up: ${followUp.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}`,
+        );
+
+        if (opts.json) {
+          out.json({
+            sent: true,
+            messageId,
+            threadId,
+            to: contact.email,
+            subject: pitch.subject,
+          });
+        }
+
+        console.log("");
+      } catch (err) {
+        spinner.stop();
+        out.error(err instanceof Error ? err.message : "Unknown error");
+        process.exit(1);
+      }
+    });
+}
