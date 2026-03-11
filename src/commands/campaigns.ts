@@ -4,6 +4,7 @@
 
 import { Command } from "commander";
 import chalk from "chalk";
+import * as prompts from "@clack/prompts";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
 import { GLYPH, COLOUR } from "../ui/theme.js";
@@ -216,32 +217,77 @@ export async function showCampaign(
       }
     }
 
-    // -- Coverage --
-    if (coverageClips.length > 0) {
-      sectionHeader("Coverage", `${coverageClips.length}`);
-      for (const clip of coverageClips) {
-        console.log(
-          `  ${out.truncate(clip.title, 34)?.padEnd(34)}  ${chalk.dim(clip.type?.padEnd(12) || "")}  ${shortDate(clip.publish_date)}`,
-        );
-        if (clip.url) {
-          console.log(`    ${chalk.dim(clip.url)}`);
+    // -- Progressive disclosure for coverage + outcomes (TTY only) --
+    const hasMoreSections = coverageClips.length > 0 || outcomes.length > 0;
+
+    if (hasMoreSections && process.stdout.isTTY) {
+      while (true) {
+        const drillOptions: Array<{ value: string; label: string; hint?: string }> = [];
+        if (coverageClips.length > 0) drillOptions.push({ value: "coverage", label: "Coverage", hint: `${coverageClips.length} clips` });
+        if (outcomes.length > 0) drillOptions.push({ value: "outcomes", label: "Outcome distribution", hint: `${outcomes.length}` });
+        drillOptions.push({ value: "done", label: chalk.dim("Done") });
+
+        const drill = (await prompts.select({
+          message: "Show more?",
+          options: drillOptions,
+        })) as string | symbol;
+
+        if (prompts.isCancel(drill) || drill === "done") break;
+
+        if (drill === "coverage") {
+          sectionHeader("Coverage", `${coverageClips.length}`);
+          for (const clip of coverageClips) {
+            console.log(
+              `  ${out.truncate(clip.title, 34)?.padEnd(34)}  ${chalk.dim(clip.type?.padEnd(12) || "")}  ${shortDate(clip.publish_date)}`,
+            );
+            if (clip.url) {
+              console.log(`    ${chalk.dim(clip.url)}`);
+            }
+          }
+        }
+
+        if (drill === "outcomes") {
+          const outcomeDist: Record<string, number> = {};
+          for (const o of outcomes) {
+            outcomeDist[o.outcome_type] = (outcomeDist[o.outcome_type] || 0) + 1;
+          }
+          sectionHeader("Outcomes", `${outcomes.length}`);
+          const sorted = Object.entries(outcomeDist).sort(([, a], [, b]) => b - a);
+          for (const [type, count] of sorted) {
+            const ratio = count / outcomes.length;
+            console.log(
+              `  ${type.replace(/_/g, " ").padEnd(18)}${sparkbar(ratio)}  ${String(count).padStart(4)}`,
+            );
+          }
         }
       }
-    }
-
-    // -- Outcome Distribution --
-    if (outcomes.length > 0) {
-      const outcomeDist: Record<string, number> = {};
-      for (const o of outcomes) {
-        outcomeDist[o.outcome_type] = (outcomeDist[o.outcome_type] || 0) + 1;
+    } else if (!process.stdout.isTTY) {
+      // Non-interactive: dump everything
+      if (coverageClips.length > 0) {
+        sectionHeader("Coverage", `${coverageClips.length}`);
+        for (const clip of coverageClips) {
+          console.log(
+            `  ${out.truncate(clip.title, 34)?.padEnd(34)}  ${chalk.dim(clip.type?.padEnd(12) || "")}  ${shortDate(clip.publish_date)}`,
+          );
+          if (clip.url) {
+            console.log(`    ${chalk.dim(clip.url)}`);
+          }
+        }
       }
-      sectionHeader("Outcomes", `${outcomes.length}`);
-      const sorted = Object.entries(outcomeDist).sort(([, a], [, b]) => b - a);
-      for (const [type, count] of sorted) {
-        const ratio = count / outcomes.length;
-        console.log(
-          `  ${type.replace(/_/g, " ").padEnd(18)}${sparkbar(ratio)}  ${String(count).padStart(4)}`,
-        );
+
+      if (outcomes.length > 0) {
+        const outcomeDist: Record<string, number> = {};
+        for (const o of outcomes) {
+          outcomeDist[o.outcome_type] = (outcomeDist[o.outcome_type] || 0) + 1;
+        }
+        sectionHeader("Outcomes", `${outcomes.length}`);
+        const sorted = Object.entries(outcomeDist).sort(([, a], [, b]) => b - a);
+        for (const [type, count] of sorted) {
+          const ratio = count / outcomes.length;
+          console.log(
+            `  ${type.replace(/_/g, " ").padEnd(18)}${sparkbar(ratio)}  ${String(count).padStart(4)}`,
+          );
+        }
       }
     }
 

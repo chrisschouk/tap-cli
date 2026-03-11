@@ -12,7 +12,6 @@ import chalk from "chalk";
 import * as prompts from "@clack/prompts";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
-import { GLYPH } from "../ui/theme.js";
 import { warningBlock } from "../ui/detail.js";
 import { createRailSpinner, stepComplete, blank } from "../ui/format.js";
 import {

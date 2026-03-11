@@ -4,6 +4,7 @@
 
 import { Command } from "commander";
 import chalk from "chalk";
+import * as prompts from "@clack/prompts";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
 import {
@@ -85,15 +86,15 @@ export async function showContact(
     console.log(
       `  ${chalk.bold(contact.name || contact.email)}${warmthStr ? "  " + warmthStr : ""}`,
     );
-    const parts = [
+    const headerParts = [
       contact.outlet,
       contact.role,
       contact.email,
     ].filter(Boolean);
-    console.log(`  ${chalk.dim(parts.join("  ·  "))}`);
+    console.log(`  ${chalk.dim(headerParts.join("  ·  "))}`);
     console.log(chalk.dim(`  ${"\u2500".repeat(44)}`));
 
-    // -- Relationship --
+    // -- Relationship (always shown) --
     if (metrics) {
       sectionHeader("Relationship");
       const warmthScore = metrics.warmth_score ?? 0;
@@ -129,55 +130,11 @@ export async function showContact(
       );
     }
 
-    // -- Intelligence --
-    const hasIntel =
-      contact.platform_type ||
-      contact.genres?.length ||
-      contact.geographic_scope ||
-      contact.best_timing ||
-      contact.bbc_station ||
-      contact.submission_guidelines ||
-      contact.pitch_tips?.length;
-
-    if (hasIntel) {
-      sectionHeader("Intelligence");
-      console.log(field("Platform", contact.platform_type));
-      console.log(fieldList("Genres", contact.genres));
-      console.log(field("Geographic", contact.geographic_scope));
-      console.log(field("Best timing", contact.best_timing));
-      if (contact.bbc_station) {
-        console.log(field("BBC station", contact.bbc_station));
-        console.log(fieldList("BBC shows", contact.bbc_shows));
-      }
-      if (contact.submission_guidelines) {
-        console.log(
-          field(
-            "Guidelines",
-            out.truncate(contact.submission_guidelines, 60),
-          ),
-        );
-      }
-      if (contact.pitch_tips && contact.pitch_tips.length > 0) {
-        console.log(field("Pitch tips", ""));
-        for (const tip of contact.pitch_tips) {
-          console.log(`${"".padEnd(20)}${chalk.dim(".")} ${tip}`);
-        }
-      }
-      const confidenceColours: Record<string, (s: string) => string> = {
-        High: chalk.green,
-        Medium: chalk.yellow,
-        Low: chalk.red,
-      };
-      console.log(field("Confidence", contact.enrichment_confidence, {
-        colour: confidenceColours[contact.enrichment_confidence || ""] || chalk.red,
-      }));
-      console.log(field("Enriched", relativeDate(contact.enriched_at)));
-    }
-
-    // -- Campaigns --
+    // -- Campaigns (compact: max 3) --
     if (campaigns.length > 0) {
       sectionHeader("Campaigns", `${campaigns.length}`);
-      for (const c of campaigns) {
+      const shown = campaigns.slice(0, 3);
+      for (const c of shown) {
         const label = c.artist_name
           ? `${c.artist_name} -- ${c.project_name}`
           : c.project_name;
@@ -185,38 +142,12 @@ export async function showContact(
           `  ${out.truncate(label, 32)?.padEnd(32)}  ${out.pitchStatusBadge(c.pitch_status)?.padEnd(14)}  ${shortDate(c.last_pitched_at)}`,
         );
       }
-    }
-
-    // -- Recent Outcomes --
-    if (outcomes.length > 0) {
-      sectionHeader("Recent Outcomes", `${outcomes.length}`);
-      for (const o of outcomes) {
-        const campaign = o.artist_name
-          ? `${o.artist_name} -- ${o.project_name}`
-          : o.project_name || "";
-        console.log(
-          `  ${out.pitchStatusBadge(o.outcome_type)?.padEnd(14)}  ${out.truncate(campaign, 28)?.padEnd(28)}  ${shortDate(o.occurred_at)}`,
-        );
-        if (o.notes) {
-          console.log(`${"".padEnd(4)}${chalk.dim(`"${out.truncate(o.notes, 50)}"`)}`)
-        }
+      if (campaigns.length > 3) {
+        console.log(chalk.dim(`  +${campaigns.length - 3} more`));
       }
     }
 
-    // -- Coverage --
-    if (coverage.length > 0) {
-      sectionHeader("Coverage", `${coverage.length}`);
-      for (const c of coverage) {
-        console.log(
-          `  ${out.truncate(c.title, 34)?.padEnd(34)}  ${chalk.dim(c.type?.padEnd(12) || "")}  ${shortDate(c.publish_date)}`,
-        );
-        if (c.url) {
-          console.log(`${"".padEnd(4)}${chalk.dim(c.url)}`);
-        }
-      }
-    }
-
-    // -- Warnings --
+    // -- Warnings (always shown) --
     const warnings: string[] = [];
     if (contact.pitch_embargo_until) {
       const embargo = new Date(contact.pitch_embargo_until);
@@ -241,6 +172,156 @@ export async function showContact(
     }
     if (warnings.length > 0) {
       warningBlock(warnings);
+    }
+
+    // -- Progressive disclosure (TTY only) --
+    const hasIntel =
+      contact.platform_type ||
+      contact.genres?.length ||
+      contact.geographic_scope ||
+      contact.best_timing ||
+      contact.bbc_station ||
+      contact.submission_guidelines ||
+      contact.pitch_tips?.length;
+
+    const hasMoreSections =
+      hasIntel || outcomes.length > 0 || coverage.length > 0 || campaigns.length > 3;
+
+    if (hasMoreSections && process.stdout.isTTY) {
+      // Interactive drill-down
+      while (true) {
+        const drillOptions: Array<{ value: string; label: string; hint?: string }> = [];
+        if (hasIntel) drillOptions.push({ value: "intel", label: "Intelligence details", hint: contact.enrichment_confidence || undefined });
+        if (outcomes.length > 0) drillOptions.push({ value: "outcomes", label: "Outcomes", hint: `${outcomes.length}` });
+        if (coverage.length > 0) drillOptions.push({ value: "coverage", label: "Coverage", hint: `${coverage.length}` });
+        if (campaigns.length > 3) drillOptions.push({ value: "campaigns", label: "All campaigns", hint: `${campaigns.length}` });
+        drillOptions.push({ value: "done", label: chalk.dim("Done") });
+
+        const drill = (await prompts.select({
+          message: "Show more?",
+          options: drillOptions,
+        })) as string | symbol;
+
+        if (prompts.isCancel(drill) || drill === "done") break;
+
+        if (drill === "intel") {
+          sectionHeader("Intelligence");
+          console.log(field("Platform", contact.platform_type));
+          console.log(fieldList("Genres", contact.genres));
+          console.log(field("Geographic", contact.geographic_scope));
+          console.log(field("Best timing", contact.best_timing));
+          if (contact.bbc_station) {
+            console.log(field("BBC station", contact.bbc_station));
+            console.log(fieldList("BBC shows", contact.bbc_shows));
+          }
+          if (contact.submission_guidelines) {
+            console.log(field("Guidelines", out.truncate(contact.submission_guidelines, 60)));
+          }
+          if (contact.pitch_tips && contact.pitch_tips.length > 0) {
+            console.log(field("Pitch tips", ""));
+            for (const tip of contact.pitch_tips) {
+              console.log(`${"".padEnd(20)}${chalk.dim(".")} ${tip}`);
+            }
+          }
+          console.log(field("Confidence", contact.enrichment_confidence, {
+            colour: warmthColour(
+              contact.enrichment_confidence === "High" ? "warm" :
+              contact.enrichment_confidence === "Medium" ? "neutral" : "cold",
+            ),
+          }));
+          console.log(field("Enriched", relativeDate(contact.enriched_at)));
+        }
+
+        if (drill === "outcomes") {
+          sectionHeader("Recent Outcomes", `${outcomes.length}`);
+          for (const o of outcomes) {
+            const campaign = o.artist_name
+              ? `${o.artist_name} -- ${o.project_name}`
+              : o.project_name || "";
+            console.log(
+              `  ${out.pitchStatusBadge(o.outcome_type)?.padEnd(14)}  ${out.truncate(campaign, 28)?.padEnd(28)}  ${shortDate(o.occurred_at)}`,
+            );
+            if (o.notes) {
+              console.log(`${"".padEnd(4)}${chalk.dim(`"${out.truncate(o.notes, 50)}"`)}`);
+            }
+          }
+        }
+
+        if (drill === "coverage") {
+          sectionHeader("Coverage", `${coverage.length}`);
+          for (const c of coverage) {
+            console.log(
+              `  ${out.truncate(c.title, 34)?.padEnd(34)}  ${chalk.dim(c.type?.padEnd(12) || "")}  ${shortDate(c.publish_date)}`,
+            );
+            if (c.url) {
+              console.log(`${"".padEnd(4)}${chalk.dim(c.url)}`);
+            }
+          }
+        }
+
+        if (drill === "campaigns") {
+          sectionHeader("All Campaigns", `${campaigns.length}`);
+          for (const c of campaigns) {
+            const label = c.artist_name
+              ? `${c.artist_name} -- ${c.project_name}`
+              : c.project_name;
+            console.log(
+              `  ${out.truncate(label, 32)?.padEnd(32)}  ${out.pitchStatusBadge(c.pitch_status)?.padEnd(14)}  ${shortDate(c.last_pitched_at)}`,
+            );
+          }
+        }
+      }
+    } else if (!process.stdout.isTTY) {
+      // Non-interactive: dump everything
+      if (hasIntel) {
+        sectionHeader("Intelligence");
+        console.log(field("Platform", contact.platform_type));
+        console.log(fieldList("Genres", contact.genres));
+        console.log(field("Geographic", contact.geographic_scope));
+        console.log(field("Best timing", contact.best_timing));
+        if (contact.bbc_station) {
+          console.log(field("BBC station", contact.bbc_station));
+          console.log(fieldList("BBC shows", contact.bbc_shows));
+        }
+        if (contact.submission_guidelines) {
+          console.log(field("Guidelines", out.truncate(contact.submission_guidelines, 60)));
+        }
+        if (contact.pitch_tips && contact.pitch_tips.length > 0) {
+          console.log(field("Pitch tips", ""));
+          for (const tip of contact.pitch_tips) {
+            console.log(`${"".padEnd(20)}${chalk.dim(".")} ${tip}`);
+          }
+        }
+        console.log(field("Confidence", contact.enrichment_confidence));
+        console.log(field("Enriched", relativeDate(contact.enriched_at)));
+      }
+
+      if (outcomes.length > 0) {
+        sectionHeader("Recent Outcomes", `${outcomes.length}`);
+        for (const o of outcomes) {
+          const campaign = o.artist_name
+            ? `${o.artist_name} -- ${o.project_name}`
+            : o.project_name || "";
+          console.log(
+            `  ${out.pitchStatusBadge(o.outcome_type)?.padEnd(14)}  ${out.truncate(campaign, 28)?.padEnd(28)}  ${shortDate(o.occurred_at)}`,
+          );
+          if (o.notes) {
+            console.log(`${"".padEnd(4)}${chalk.dim(`"${out.truncate(o.notes, 50)}"`)}`);
+          }
+        }
+      }
+
+      if (coverage.length > 0) {
+        sectionHeader("Coverage", `${coverage.length}`);
+        for (const c of coverage) {
+          console.log(
+            `  ${out.truncate(c.title, 34)?.padEnd(34)}  ${chalk.dim(c.type?.padEnd(12) || "")}  ${shortDate(c.publish_date)}`,
+          );
+          if (c.url) {
+            console.log(`${"".padEnd(4)}${chalk.dim(c.url)}`);
+          }
+        }
+      }
     }
 
     // -- Navigation hints --

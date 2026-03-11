@@ -8,7 +8,7 @@
 import * as prompts from "@clack/prompts";
 import chalk from "chalk";
 import { intro, blank } from "./format.js";
-import { GLYPH, COLOUR } from "./theme.js";
+import { GLYPH } from "./theme.js";
 import { VERSION } from "../cli.js";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import { showContact, showHistory } from "../commands/contacts.js";
