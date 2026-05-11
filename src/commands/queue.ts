@@ -11,7 +11,8 @@ import * as prompts from "@clack/prompts";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
 import { GLYPH } from "../ui/theme.js";
-import { relativeDate, navHint } from "../ui/detail.js";
+import { relativeDate, navHint, campaignLabel } from "../ui/detail.js";
+import { runCommand } from "../ui/run-command.js";
 import { handleError } from "../ui/errors.js";
 import { blank } from "../ui/format.js";
 import { outcomePrompt, contactActionMenu } from "../ui/actions.js";
@@ -22,7 +23,7 @@ export function queueCommand(): Command {
     .option("-w, --workspace <id>", "Workspace ID")
     .option("--json", "Output as JSON")
     .action(async (opts) => {
-      const spinner = out.spinner("Loading action queue...").start();
+      const spinner = out.spinner("Loading action queue...");
 
       try {
         const supabase = getClient();
@@ -124,11 +125,7 @@ export function queueCommand(): Command {
               outlet: contact?.outlet || null,
               warmth: warmthMap.get(f.contact_id) || null,
               campaignId: f.project_id,
-              campaignName: campaign
-                ? campaign.artist_name
-                  ? `${campaign.artist_name} -- ${campaign.name}`
-                  : campaign.name
-                : "Unknown",
+              campaignName: campaign ? campaignLabel(campaign) : "Unknown",
               lastPitched: f.last_pitched_at,
             };
           });
@@ -180,11 +177,7 @@ export function queueCommand(): Command {
               warmth: metrics?.warmth_level || null,
               warmthScore: metrics?.warmth_score || 0,
               campaignId: u.project_id,
-              campaignName: campaign
-                ? campaign.artist_name
-                  ? `${campaign.artist_name} -- ${campaign.name}`
-                  : campaign.name
-                : "Unknown",
+              campaignName: campaign ? campaignLabel(campaign) : "Unknown",
             };
           });
 
@@ -271,16 +264,7 @@ export function queueCommand(): Command {
 
               if (!prompts.isCancel(action)) {
                 if (action === "follow_up") {
-                  blank();
-                  try {
-                    const { buildProgram } = await import("../cli.js");
-                    const program = buildProgram();
-                    program.exitOverride();
-                    program.configureOutput({ writeErr: () => {} });
-                    await program.parseAsync(["node", "tap", "pitch", fu.campaignId, fu.contactId]);
-                  } catch {
-                    // Commander throws on exitOverride
-                  }
+                  await runCommand(["pitch", fu.campaignId, fu.contactId]);
                 } else if (action === "outcome") {
                   blank();
                   await outcomePrompt(supabase, wsId, fu.campaignId, fu.contactId);
@@ -333,16 +317,7 @@ export function queueCommand(): Command {
 
             if (!prompts.isCancel(selected) && selected !== "__skip__") {
               const u = unpitchedDetails.find((d) => d.contactId === selected)!;
-              blank();
-              try {
-                const { buildProgram } = await import("../cli.js");
-                const program = buildProgram();
-                program.exitOverride();
-                program.configureOutput({ writeErr: () => {} });
-                await program.parseAsync(["node", "tap", "pitch", u.campaignId, u.contactId]);
-              } catch {
-                // Commander throws on exitOverride
-              }
+              await runCommand(["pitch", u.campaignId, u.contactId]);
             }
           } else {
             // Non-TTY or no detail data -- show summary with warmth hint
@@ -398,7 +373,7 @@ export function queueCommand(): Command {
             });
 
             if (!prompts.isCancel(shouldEnrich) && shouldEnrich) {
-              const enrichSpinner = out.spinner("Queueing enrichment...").start();
+              const enrichSpinner = out.spinner("Queueing enrichment...");
               const { error } = await supabase
                 .from("tap_contacts")
                 .update({ enrichment_source: "queued" })

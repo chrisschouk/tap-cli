@@ -127,26 +127,7 @@ export function intro(version: string, opts?: { commands?: boolean; contextBar?:
   console.log("");
 }
 
-/**
- * Compact header for command output (no tagline).
- */
-export function commandHeader(title: string, meta?: string): void {
-  console.log("");
-  if (meta) {
-    console.log(
-      `  ${chalk.bold(title)}${" ".repeat(Math.max(1, 52 - title.length - meta.length))}${chalk.dim(meta)}`,
-    );
-  } else {
-    console.log(`  ${chalk.bold(title)}`);
-  }
-  console.log(chalk.dim(`  ${GLYPH.divider.repeat(52)}`));
-}
-
 // -- Steps & checkpoints ------------------------------------------------------
-
-export function step(message: string): void {
-  console.log(`  ${message}`);
-}
 
 export function stepComplete(message: string): void {
   console.log(`  ${DIAMOND} ${message}`);
@@ -158,17 +139,6 @@ export function blank(): void {
 
 export function divider(): void {
   console.log(chalk.dim(`  ${GLYPH.divider.repeat(52)}`));
-}
-
-export function heading(text: string): void {
-  console.log(`  ${chalk.bold(text)}`);
-}
-
-export function outro(message?: string): void {
-  if (message) {
-    console.log(`  ${chalk.dim(message)}`);
-  }
-  console.log("");
 }
 
 // -- Summary bar (Mole-style) ------------------------------------------------
@@ -184,18 +154,6 @@ export function summaryBar(parts: string[]): void {
   const line = chalk.dim(`  ${SEPARATOR.repeat(52)}`);
   console.log(line);
   console.log(`  ${parts.join(chalk.dim("  |  "))}`);
-  console.log(line);
-}
-
-/**
- * Summary card with label-value rows inside separator bars.
- */
-export function summaryCard(rows: Array<[string, string]>): void {
-  const line = chalk.dim(`  ${SEPARATOR.repeat(52)}`);
-  console.log(line);
-  for (const [label, value] of rows) {
-    console.log(`  ${chalk.dim(label.padEnd(20))}${value}`);
-  }
   console.log(line);
 }
 

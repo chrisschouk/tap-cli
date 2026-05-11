@@ -9,6 +9,7 @@
 import * as prompts from "@clack/prompts";
 import chalk from "chalk";
 import { intro, blank } from "./format.js";
+import { runCommand } from "./run-command.js";
 import { GLYPH } from "./theme.js";
 import { VERSION } from "../cli.js";
 import { getClient, resolveWorkspaceId } from "../auth.js";
@@ -16,6 +17,23 @@ import { showContact, showHistory } from "../commands/contacts.js";
 import { showCampaign } from "../commands/campaigns.js";
 import * as out from "../output.js";
 import { contactActionMenu, campaignActionMenu } from "./actions.js";
+
+/**
+ * Escape a search query for safe use in PostgREST .or() ILIKE filters.
+ * Prevents filter injection via SQL wildcard and PostgREST syntax characters.
+ */
+function escapePostgrestSearch(query: string): string {
+  return query
+    .replace(/\\/g, "\\\\") // Backslash must come first
+    .replace(/'/g, "''") // SQL single quotes
+    .replace(/%/g, "\\%") // ILIKE wildcard
+    .replace(/_/g, "\\_"); // ILIKE wildcard
+}
+
+let cachedHints: { campaigns: number; contacts: number; followUps: number } | null =
+  null;
+let hintsCachedAt = 0;
+const HINTS_TTL = 60_000; // 60 seconds
 
 export async function runInteractive(): Promise<void> {
   // Fetch context stats before rendering intro
@@ -40,7 +58,8 @@ export async function runInteractive(): Promise<void> {
         .eq("workspace_id", wsId),
       supabase
         .from("campaign_contacts")
-        .select("contact_id", { count: "exact", head: true })
+        .select("*, tap_projects!inner(workspace_id)", { count: "exact", head: true })
+        .eq("tap_projects.workspace_id", wsId)
         .eq("pitch_status", "sent")
         .lt("last_pitched_at", threeDaysAgo.toISOString()),
     ]);
@@ -50,51 +69,65 @@ export async function runInteractive(): Promise<void> {
       campaigns: campResult.count || 0,
       followUps: followUpResult.count || 0,
     };
-  } catch {
-    // Non-critical
+  } catch (err) {
+    if (err instanceof Error && err.message) {
+      console.error(chalk.red(err.message));
+    }
   }
 
   intro(VERSION, { commands: true, contextBar: contextBar || undefined });
 
   while (true) {
-    // Refresh hints each loop
+    // Refresh hints each loop (cached for 60 seconds to avoid repeated round-trips)
     let campaignHint = "";
     let contactHint = "";
     let queueHint = "";
 
     try {
-      const supabase = getClient();
-      const wsId = await resolveWorkspaceId(supabase);
+      if (!cachedHints || Date.now() - hintsCachedAt > HINTS_TTL) {
+        const supabase = getClient();
+        const wsId = await resolveWorkspaceId(supabase);
 
-      const threeDaysAgo = new Date();
-      threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+        const threeDaysAgo = new Date();
+        threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
 
-      const [campResult, contactResult, followUpResult] = await Promise.all([
-        supabase
-          .from("tap_projects")
-          .select("id", { count: "exact", head: true })
-          .eq("workspace_id", wsId)
-          .eq("status", "active"),
-        supabase
-          .from("tap_contacts")
-          .select("id", { count: "exact", head: true })
-          .eq("workspace_id", wsId),
-        supabase
-          .from("campaign_contacts")
-          .select("contact_id", { count: "exact", head: true })
-          .eq("pitch_status", "sent")
-          .lt("last_pitched_at", threeDaysAgo.toISOString()),
-      ]);
+        const [campResult, contactResult, followUpResult] = await Promise.all([
+          supabase
+            .from("tap_projects")
+            .select("id", { count: "exact", head: true })
+            .eq("workspace_id", wsId)
+            .eq("status", "active"),
+          supabase
+            .from("tap_contacts")
+            .select("id", { count: "exact", head: true })
+            .eq("workspace_id", wsId),
+          supabase
+            .from("campaign_contacts")
+            .select("*, tap_projects!inner(workspace_id)", { count: "exact", head: true })
+            .eq("tap_projects.workspace_id", wsId)
+            .eq("pitch_status", "sent")
+            .lt("last_pitched_at", threeDaysAgo.toISOString()),
+        ]);
 
-      const activeCampaigns = campResult.count || 0;
-      const totalContacts = contactResult.count || 0;
-      const followUps = followUpResult.count || 0;
+        cachedHints = {
+          campaigns: campResult.count || 0,
+          contacts: contactResult.count || 0,
+          followUps: followUpResult.count || 0,
+        };
+        hintsCachedAt = Date.now();
+      }
+
+      const activeCampaigns = cachedHints.campaigns;
+      const totalContacts = cachedHints.contacts;
+      const followUps = cachedHints.followUps;
 
       campaignHint = `${activeCampaigns} active`;
       contactHint = `${totalContacts} total`;
       queueHint = followUps > 0 ? `${followUps} follow-ups due` : "all clear";
-    } catch {
-      // Hints are non-critical
+    } catch (err) {
+      if (err instanceof Error && err.message) {
+        console.error(chalk.red(err.message));
+      }
     }
 
     const action = (await prompts.select({
@@ -262,8 +295,11 @@ async function campaignsMenu(): Promise<void> {
             const result = await campaignActionMenu(supabase, wsId, drill as string);
             if (result !== "back") break;
           }
-        } catch {
+        } catch (err) {
           spinner.stop();
+          if (err instanceof Error && err.message) {
+            console.error(chalk.red(err.message));
+          }
         }
         break;
       }
@@ -319,8 +355,10 @@ async function campaignsMenu(): Promise<void> {
           if (prompts.isCancel(status)) continue;
 
           await runCommand(["campaigns", "status", campaignId, status as string]);
-        } catch {
-          // handled
+        } catch (err) {
+          if (err instanceof Error && err.message) {
+            console.error(chalk.red(err.message));
+          }
         }
         break;
       }
@@ -351,18 +389,12 @@ async function contactsMenu(): Promise<void> {
           const supabase = getClient();
           const wsId = await resolveWorkspaceId(supabase);
 
-          const [contactResult, metricsResult] = await Promise.all([
-            supabase
-              .from("tap_contacts")
-              .select("id, name, email, outlet")
-              .eq("workspace_id", wsId)
-              .order("name", { ascending: true })
-              .limit(20),
-            supabase
-              .from("contact_relationship_metrics")
-              .select("contact_id, warmth_level")
-              .eq("workspace_id", wsId),
-          ]);
+          const contactResult = await supabase
+            .from("tap_contacts")
+            .select("id, name, email, outlet")
+            .eq("workspace_id", wsId)
+            .order("name", { ascending: true })
+            .limit(20);
 
           spinner.stop();
 
@@ -375,13 +407,23 @@ async function contactsMenu(): Promise<void> {
             break;
           }
 
+          // Fetch metrics only for the contacts in this page
+          const contactIds = data.map((c) => c.id);
+          const metricsResult = await supabase
+            .from("contact_relationship_metrics")
+            .select("contact_id, warmth_level")
+            .in("contact_id", contactIds);
+
           const warmthMap = buildWarmthMap(metricsResult.data);
 
           await runCommand(["contacts", "list", "--limit", "20"]);
 
           await contactListDrillDown(data, warmthMap);
-        } catch {
+        } catch (err) {
           spinner.stop();
+          if (err instanceof Error && err.message) {
+            console.error(chalk.red(err.message));
+          }
         }
         break;
       }
@@ -397,23 +439,17 @@ async function contactsMenu(): Promise<void> {
         try {
           const supabase = getClient();
           const wsId = await resolveWorkspaceId(supabase);
-          const q = (query as string).replace(/'/g, "''");
+          const q = escapePostgrestSearch(query as string);
 
-          const [searchResult, metricsResult] = await Promise.all([
-            supabase
-              .from("tap_contacts")
-              .select("id, name, email, outlet")
-              .eq("workspace_id", wsId)
-              .or(
-                `name.ilike.%${q}%,email.ilike.%${q}%,outlet.ilike.%${q}%,bbc_station.ilike.%${q}%`,
-              )
-              .order("name", { ascending: true })
-              .limit(20),
-            supabase
-              .from("contact_relationship_metrics")
-              .select("contact_id, warmth_level")
-              .eq("workspace_id", wsId),
-          ]);
+          const searchResult = await supabase
+            .from("tap_contacts")
+            .select("id, name, email, outlet")
+            .eq("workspace_id", wsId)
+            .or(
+              `name.ilike.%${q}%,email.ilike.%${q}%,outlet.ilike.%${q}%,bbc_station.ilike.%${q}%`,
+            )
+            .order("name", { ascending: true })
+            .limit(20);
 
           spinner.stop();
 
@@ -426,13 +462,23 @@ async function contactsMenu(): Promise<void> {
             break;
           }
 
+          // Fetch metrics only for the contacts returned
+          const contactIds = data.map((c) => c.id);
+          const metricsResult = await supabase
+            .from("contact_relationship_metrics")
+            .select("contact_id, warmth_level")
+            .in("contact_id", contactIds);
+
           const warmthMap = buildWarmthMap(metricsResult.data);
 
           await runCommand(["contacts", "search", query as string]);
 
           await contactListDrillDown(data, warmthMap);
-        } catch {
+        } catch (err) {
           spinner.stop();
+          if (err instanceof Error && err.message) {
+            console.error(chalk.red(err.message));
+          }
         }
         break;
       }
@@ -543,8 +589,10 @@ async function sendMenu(): Promise<void> {
     if (prompts.isCancel(selected) || selected === "__back__") return;
 
     await runCommand(["send", selected as string]);
-  } catch {
-    // handled
+  } catch (err) {
+    if (err instanceof Error && err.message) {
+      console.error(chalk.red(err.message));
+    }
   }
 }
 
@@ -566,8 +614,10 @@ async function outcomeMenu(): Promise<void> {
 
     blank();
     await doOutcome(supabase, wsId, campaignId, contactId);
-  } catch {
-    // handled
+  } catch (err) {
+    if (err instanceof Error && err.message) {
+      console.error(chalk.red(err.message));
+    }
   }
 }
 
@@ -616,12 +666,14 @@ async function watchMenu(): Promise<void> {
         message: "Which campaign to watch?",
       });
       if (!campaignId) return;
-      await runCommand(["watch", "--campaign", campaignId]);
+      await runCommand(["watch", campaignId]);
     } else {
       await runCommand(["watch"]);
     }
-  } catch {
-    // handled
+  } catch (err) {
+    if (err instanceof Error && err.message) {
+      console.error(chalk.red(err.message));
+    }
   }
 }
 
@@ -677,7 +729,10 @@ async function contactDrillDown(contactId: string): Promise<void> {
     const supabase = getClient();
     const wsId = await resolveWorkspaceId(supabase);
     await contactActionMenu(supabase, wsId, contactId);
-  } catch {
+  } catch (err) {
+    if (err instanceof Error && err.message) {
+      console.error(chalk.red(err.message));
+    }
     // Fall back to basic options if auth fails
     const next = (await prompts.select({
       message: "What next?",
@@ -694,24 +749,8 @@ async function contactDrillDown(contactId: string): Promise<void> {
       blank();
       await showHistory(contactId, {});
     } else if (next === "open") {
-      await runCommand(["open", contactId.slice(0, 8)]);
+      await runCommand(["open", contactId]);
     }
   }
 }
 
-/**
- * Execute a CLI command programmatically by re-parsing args.
- */
-async function runCommand(args: string[]): Promise<void> {
-  blank();
-  try {
-    const { buildProgram } = await import("../cli.js");
-    const program = buildProgram();
-    program.exitOverride();
-    program.configureOutput({ writeErr: () => {} });
-    await program.parseAsync(["node", "tap", ...args]);
-  } catch {
-    // Commander throws on exitOverride -- that's fine
-  }
-  blank();
-}

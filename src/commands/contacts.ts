@@ -14,6 +14,9 @@ import {
   fetchContactCampaigns,
   fetchContactCoverage,
   resolveContactByEmail,
+  type ContactFull,
+  type ContactOutcome,
+  type ContactCoverage,
 } from "../lib/contact-queries.js";
 import {
   field,
@@ -27,12 +30,25 @@ import {
   navHint,
   shortDate,
   ansiPadEnd,
+  campaignLabel,
 } from "../ui/detail.js";
 import { handleError } from "../ui/errors.js";
 import { blank } from "../ui/format.js";
+import { runCommand } from "../ui/run-command.js";
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function renderIntelligence(contact: any, interactive = false): void {
+/**
+ * Escape a search query for safe use in PostgREST .or() ILIKE filters.
+ * Prevents filter injection via SQL wildcard and PostgREST syntax characters.
+ */
+function escapePostgrestSearch(query: string): string {
+  return query
+    .replace(/\\/g, "\\\\") // Backslash must come first
+    .replace(/'/g, "''") // SQL single quotes
+    .replace(/%/g, "\\%") // ILIKE wildcard
+    .replace(/_/g, "\\_"); // ILIKE wildcard
+}
+
+function renderIntelligence(contact: ContactFull, interactive = false): void {
   sectionHeader("Intelligence");
   console.log(field("Platform", contact.platform_type));
   console.log(fieldList("Genres", contact.genres));
@@ -64,8 +80,7 @@ function renderIntelligence(contact: any, interactive = false): void {
   console.log(field("Enriched", relativeDate(contact.enriched_at)));
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function renderOutcomes(outcomes: any[]): void {
+function renderOutcomes(outcomes: ContactOutcome[]): void {
   sectionHeader("Recent Outcomes", `${outcomes.length}`);
   for (const o of outcomes) {
     const campaign = o.artist_name
@@ -80,8 +95,7 @@ function renderOutcomes(outcomes: any[]): void {
   }
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function renderCoverage(coverage: any[]): void {
+function renderCoverage(coverage: ContactCoverage[]): void {
   sectionHeader("Coverage", `${coverage.length}`);
   for (const c of coverage) {
     console.log(
@@ -101,7 +115,7 @@ export async function showContact(
   contactId: string,
   opts: { workspace?: string; json?: boolean },
 ): Promise<void> {
-  const spinner = out.spinner("Loading contact...").start();
+  const spinner = out.spinner("Loading contact...");
 
   try {
     const supabase = getClient();
@@ -250,8 +264,6 @@ export async function showContact(
       contact.pitch_tips?.length;
 
     if (process.stdout.isTTY) {
-      const { contactActionMenu } = await import("../ui/actions.js");
-
       while (true) {
         const drillOptions: Array<{ value: string; label: string; hint?: string }> = [];
 
@@ -261,8 +273,11 @@ export async function showContact(
         if (coverage.length > 0) drillOptions.push({ value: "coverage", label: "Coverage", hint: `${coverage.length}` });
         if (campaigns.length > 3) drillOptions.push({ value: "campaigns", label: "All campaigns", hint: `${campaigns.length}` });
 
-        // Action options
-        drillOptions.push({ value: "actions", label: "Actions", hint: "pitch, outcome, enrich" });
+        // Inlined action options (no sub-menu)
+        drillOptions.push({ value: "pitch", label: "Pitch", hint: "generate AI draft" });
+        drillOptions.push({ value: "log-outcome", label: "Log outcome" });
+        drillOptions.push({ value: "enrich", label: "Enrich", hint: "queue AI enrichment" });
+        drillOptions.push({ value: "open", label: "Open in browser" });
         drillOptions.push({ value: "done", label: chalk.dim("Done") });
 
         const drill = (await prompts.select({
@@ -288,13 +303,37 @@ export async function showContact(
               `  ${(out.truncate(label, 32) || "").padEnd(32)}  ${ansiPadEnd(out.pitchStatusBadge(c.pitch_status) || "", 14)}  ${shortDate(c.last_pitched_at)}`,
             );
           }
-        } else if (drill === "actions") {
+        } else if (drill === "pitch" || drill === "log-outcome" || drill === "enrich" || drill === "open") {
           const supabase = getClient();
           const wsId = await resolveWorkspaceId(supabase, opts.workspace);
-          const result = await contactActionMenu(supabase, wsId, contact.id);
-          if (result === "back") continue;
-          // After an action, break out (state may have changed)
-          break;
+          if (drill === "pitch") {
+            const { selectCampaign } = await import("../ui/actions.js");
+            const campaignId = await selectCampaign(supabase, wsId, { statusFilter: "active", message: "Which campaign?" });
+            if (campaignId) {
+              await runCommand(["pitch", campaignId, contact.id]);
+            }
+            continue;
+          } else if (drill === "log-outcome") {
+            const { selectCampaign, outcomePrompt } = await import("../ui/actions.js");
+            const campaignId = await selectCampaign(supabase, wsId, { message: "Which campaign?" });
+            if (campaignId) {
+              await outcomePrompt(supabase, wsId, campaignId, contact.id);
+            }
+            continue;
+          } else if (drill === "enrich") {
+            const spinner2 = out.spinner("Queueing enrichment...");
+            const { error: enrichErr } = await supabase
+              .from("tap_contacts")
+              .update({ enrichment_source: "queued" })
+              .eq("id", contact.id);
+            spinner2.stop();
+            if (enrichErr) out.error(enrichErr.message);
+            else out.success(`Contact ${contact.id.slice(0, 8)} queued for enrichment`);
+            continue;
+          } else if (drill === "open") {
+            await runCommand(["open", contact.id]);
+            break;
+          }
         }
       }
     } else {
@@ -327,7 +366,7 @@ export async function showHistory(
   contactId: string,
   opts: { workspace?: string; limit?: string; json?: boolean },
 ): Promise<void> {
-  const spinner = out.spinner("Loading history...").start();
+  const spinner = out.spinner("Loading history...");
 
   try {
     const supabase = getClient();
@@ -411,11 +450,7 @@ export async function showHistory(
 
     for (const o of outcomeData) {
       const project = o.project_id ? projectMap.get(o.project_id) : null;
-      const campaign = project
-        ? project.artist_name
-          ? `${project.artist_name} -- ${project.name}`
-          : project.name
-        : "";
+      const campaign = project ? campaignLabel(project) : "";
       events.push({
         date: o.occurred_at || "",
         type: o.outcome_type,
@@ -427,11 +462,7 @@ export async function showHistory(
     for (const d of draftsData) {
       if (d.send_status === "sent" && d.sent_at) {
         const project = d.campaign_id ? projectMap.get(d.campaign_id) : null;
-        const campaign = project
-          ? project.artist_name
-            ? `${project.artist_name} -- ${project.name}`
-            : project.name
-          : "";
+        const campaign = project ? campaignLabel(project) : "";
         events.push({
           date: d.sent_at,
           type: "pitched",
@@ -511,18 +542,25 @@ export function contactsCommand(): Command {
     .option("--sort <field>", "Sort by: name, warmth, response, last-contacted", "name")
     .option("-w, --workspace <id>", "Workspace ID")
     .option("-l, --limit <n>", "Max results", "50")
+    .option("-p, --page <number>", "Page number", "1")
     .option("--json", "Output as JSON")
     .addHelpText("after", `
 Examples:
   tap contacts list --warm --sort warmth
   tap contacts list --bbc --sort response
-  tap contacts list --genre electronic -l 20`)
+  tap contacts list --genre electronic -l 20
+  tap contacts list --page 2`)
     .action(async (opts) => {
-      const spinner = out.spinner("Fetching contacts...").start();
+      const spinner = out.spinner("Fetching contacts...");
 
       try {
         const supabase = getClient();
         const wsId = await resolveWorkspaceId(supabase, opts.workspace);
+
+        const page = parseInt(opts.page) || 1;
+        const limit = opts.warm ? 500 : parseInt(opts.limit) || 50;
+        const from = (page - 1) * limit;
+        const to = from + limit - 1;
 
         // Fetch contacts
         let query = supabase
@@ -533,24 +571,40 @@ Examples:
           )
           .eq("workspace_id", wsId)
           .order("name", { ascending: true })
-          .limit(opts.warm ? 500 : parseInt(opts.limit));
+          .range(from, to);
 
         if (opts.status) query = query.eq("pipeline_status", opts.status);
         if (opts.genre) query = query.contains("genres", [opts.genre]);
         if (opts.bbc) query = query.not("bbc_station", "is", null);
 
-        // Fetch metrics for warmth/response data
-        const [contactResult, metricsResult] = await Promise.all([
-          query,
-          supabase
-            .from("contact_relationship_metrics")
-            .select("contact_id, warmth_level, warmth_score, response_rate")
-            .eq("workspace_id", wsId),
-        ]);
+        // Fetch contacts first, then metrics for only those contact IDs
+        const contactResult = await query;
 
         spinner.stop();
 
         const { data, count, error } = contactResult;
+
+        // Fetch metrics only for the contacts in this page
+        let metricsResult: { data: Array<{ contact_id: string; warmth_level: string | null; warmth_score: number | null; response_rate: number }> | null } = { data: null };
+        if (data && data.length > 0) {
+          const contactIds = data.map((c) => c.id);
+          // Batch in groups of 200 to stay within PostgREST URL limits
+          const batches = [];
+          for (let i = 0; i < contactIds.length; i += 200) {
+            batches.push(contactIds.slice(i, i + 200));
+          }
+          const batchResults = await Promise.all(
+            batches.map((batch) =>
+              supabase
+                .from("contact_relationship_metrics")
+                .select("contact_id, warmth_level, warmth_score, response_rate")
+                .in("contact_id", batch),
+            ),
+          );
+          metricsResult = {
+            data: batchResults.flatMap((r) => r.data || []),
+          };
+        }
 
         if (error) {
           out.error(error.message);
@@ -615,17 +669,14 @@ Examples:
           });
         }
 
-        // Limit after filter/sort
-        const limited = merged.slice(0, parseInt(opts.limit));
-
         if (opts.json) {
-          out.json({ contacts: limited, total: count });
+          out.json({ contacts: merged, total: count, page, limit });
           return;
         }
 
         out.table(
           ["Name", "Outlet", "Warmth", "Response", "Status", "Last Contact", "Confidence"],
-          limited.map((c) => [
+          merged.map((c) => [
             out.truncate(c.name, 22),
             out.truncate(c.outlet, 16) || "\u2014",
             out.warmthBadge(c.warmth_level),
@@ -636,7 +687,13 @@ Examples:
           ]),
         );
 
-        out.info(`${limited.length} of ${count || 0} contacts${opts.warm ? " (warm/hot only)" : ""}`);
+        const totalCount = count || 0;
+        const totalPages = Math.ceil(totalCount / limit);
+        console.log(chalk.dim(`  Page ${page} of ${totalPages} (${totalCount} contacts${opts.warm ? ", warm/hot only" : ""})`));
+        if (page < totalPages) {
+          const nextArgs = [`--page ${page + 1}`, opts.limit !== "50" ? `-l ${opts.limit}` : ""].filter(Boolean).join(" ");
+          console.log(chalk.dim(`  Next: tap contacts list ${nextArgs}`));
+        }
 
         navHint([
           "tap contacts show <id>",
@@ -678,34 +735,38 @@ Examples:
     .option("-w, --workspace <id>", "Workspace ID")
     .option("--json", "Output as JSON")
     .action(async (query, opts) => {
-      const spinner = out.spinner("Searching...").start();
+      const spinner = out.spinner("Searching...");
 
       try {
         const supabase = getClient();
         const wsId = await resolveWorkspaceId(supabase, opts.workspace);
-        const q = query.replace(/'/g, "''");
+        const q = escapePostgrestSearch(query);
 
-        const [searchResult, metricsResult] = await Promise.all([
-          supabase
-            .from("tap_contacts")
-            .select(
-              "id, name, email, outlet, role, bbc_station, enrichment_confidence",
-            )
-            .eq("workspace_id", wsId)
-            .or(
-              `name.ilike.%${q}%,email.ilike.%${q}%,outlet.ilike.%${q}%,bbc_station.ilike.%${q}%`,
-            )
-            .order("name", { ascending: true })
-            .limit(20),
-          supabase
-            .from("contact_relationship_metrics")
-            .select("contact_id, warmth_level")
-            .eq("workspace_id", wsId),
-        ]);
+        const searchResult = await supabase
+          .from("tap_contacts")
+          .select(
+            "id, name, email, outlet, role, bbc_station, enrichment_confidence",
+          )
+          .eq("workspace_id", wsId)
+          .or(
+            `name.ilike.%${q}%,email.ilike.%${q}%,outlet.ilike.%${q}%,bbc_station.ilike.%${q}%`,
+          )
+          .order("name", { ascending: true })
+          .limit(20);
 
         spinner.stop();
 
         const { data, error } = searchResult;
+
+        // Fetch metrics only for the contacts returned
+        let metricsResult: { data: Array<{ contact_id: string; warmth_level: string | null }> | null } = { data: null };
+        if (data && data.length > 0) {
+          const contactIds = data.map((c) => c.id);
+          metricsResult = await supabase
+            .from("contact_relationship_metrics")
+            .select("contact_id, warmth_level")
+            .in("contact_id", contactIds);
+        }
 
         if (error) {
           out.error(error.message);
@@ -774,7 +835,7 @@ Examples:
     .option("-w, --workspace <id>", "Workspace ID")
     .option("--json", "Output as JSON")
     .action(async (opts) => {
-      const spinner = out.spinner("Adding contact...").start();
+      const spinner = out.spinner("Adding contact...");
 
       try {
         const supabase = getClient();
@@ -838,7 +899,7 @@ Examples:
     .description("Queue a contact for AI enrichment")
     .argument("<id>", "Contact ID")
     .action(async (id) => {
-      const spinner = out.spinner("Queueing enrichment...").start();
+      const spinner = out.spinner("Queueing enrichment...");
 
       try {
         const supabase = getClient();

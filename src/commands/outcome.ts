@@ -43,7 +43,7 @@ Examples:
         process.exit(1);
       }
 
-      const spinner = out.spinner("Logging outcome...").start();
+      const spinner = out.spinner("Logging outcome...");
 
       try {
         const supabase = getClient();
@@ -57,6 +57,20 @@ Examples:
           if (statuses.pipelineStatus) out.info(`Would set pipeline status: ${statuses.pipelineStatus}`);
           if (opts.notes) out.info(`Notes: ${opts.notes}`);
           return;
+        }
+
+        // Verify campaign-contact relationship exists
+        const { data: ccRow } = await supabase
+          .from("campaign_contacts")
+          .select("id")
+          .eq("project_id", campaignId)
+          .eq("contact_id", contactId)
+          .maybeSingle();
+
+        if (!ccRow) {
+          spinner.stop();
+          out.error("Contact is not part of this campaign. Add them first.");
+          process.exit(1);
         }
 
         // Insert outcome record

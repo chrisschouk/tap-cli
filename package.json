@@ -1,11 +1,11 @@
 {
-  "name": "tap-cli",
+  "name": "@totalaudiopromo/tap-cli",
   "version": "0.2.0",
   "description": "CLI for Total Audio Platform — manage campaigns, contacts, and pitches from the terminal",
   "license": "MIT",
   "type": "module",
   "bin": {
-    "tap": "./dist/cli.js"
+    "tap": "dist/cli.js"
   },
   "main": "./dist/cli.js",
   "scripts": {
@@ -55,7 +55,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/totalaudiopromo/tap-cli.git"
+    "url": "git+https://github.com/totalaudiopromo/tap-cli.git"
   },
   "author": "Total Audio Promo",
   "files": [

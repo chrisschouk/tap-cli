@@ -10,6 +10,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import * as out from "../output.js";
 import { GLYPH } from "./theme.js";
 import { blank } from "./format.js";
+import { campaignLabel } from "./detail.js";
+import { runCommand } from "./run-command.js";
 import {
   VALID_OUTCOME_TYPES,
   mapOutcomeToStatuses,
@@ -50,7 +52,7 @@ export async function selectCampaign(
     options: [
       ...data.map((c) => ({
         value: c.id as string,
-        label: c.artist_name ? `${c.artist_name} -- ${c.name}` : c.name,
+        label: campaignLabel(c),
         hint: c.status,
       })),
       { value: "__back__" as string, label: chalk.dim("Cancel") },
@@ -162,7 +164,7 @@ export async function outcomePrompt(
 
   if (prompts.isCancel(notes)) return false;
 
-  const spinner = out.spinner("Logging outcome...").start();
+  const spinner = out.spinner("Logging outcome...");
   const statuses = mapOutcomeToStatuses(outcomeType as OutcomeType);
 
   const { error } = await supabase
@@ -252,17 +254,7 @@ export async function contactActionMenu(
         if (!campaignId) return "back";
       }
 
-      // Run pitch command programmatically
-      blank();
-      try {
-        const { buildProgram } = await import("../cli.js");
-        const program = buildProgram();
-        program.exitOverride();
-        program.configureOutput({ writeErr: () => {} });
-        await program.parseAsync(["node", "tap", "pitch", campaignId, contactId]);
-      } catch {
-        // Commander throws on exitOverride
-      }
+      await runCommand(["pitch", campaignId, contactId]);
       return "pitch";
     }
 
@@ -280,7 +272,7 @@ export async function contactActionMenu(
     }
 
     case "enrich": {
-      const spinner = out.spinner("Queueing enrichment...").start();
+      const spinner = out.spinner("Queueing enrichment...");
       const { error } = await supabase
         .from("tap_contacts")
         .update({ enrichment_source: "queued" })
@@ -303,15 +295,7 @@ export async function contactActionMenu(
     }
 
     case "open": {
-      try {
-        const { buildProgram } = await import("../cli.js");
-        const program = buildProgram();
-        program.exitOverride();
-        program.configureOutput({ writeErr: () => {} });
-        await program.parseAsync(["node", "tap", "open", contactId.slice(0, 8)]);
-      } catch {
-        // Commander throws on exitOverride
-      }
+      await runCommand(["open", contactId]);
       return "open";
     }
 
@@ -344,16 +328,7 @@ export async function campaignActionMenu(
 
   switch (action) {
     case "pitch": {
-      blank();
-      try {
-        const { buildProgram } = await import("../cli.js");
-        const program = buildProgram();
-        program.exitOverride();
-        program.configureOutput({ writeErr: () => {} });
-        await program.parseAsync(["node", "tap", "pitch", campaignId]);
-      } catch {
-        // Commander throws on exitOverride
-      }
+      await runCommand(["pitch", campaignId]);
       return "pitch";
     }
 
@@ -381,7 +356,7 @@ export async function campaignActionMenu(
 
       if (prompts.isCancel(status)) return "back";
 
-      const spinner = out.spinner("Updating status...").start();
+      const spinner = out.spinner("Updating status...");
       const { error } = await supabase
         .from("tap_projects")
         .update({ status })
@@ -397,29 +372,12 @@ export async function campaignActionMenu(
     }
 
     case "contacts": {
-      blank();
-      try {
-        const { buildProgram } = await import("../cli.js");
-        const program = buildProgram();
-        program.exitOverride();
-        program.configureOutput({ writeErr: () => {} });
-        await program.parseAsync(["node", "tap", "campaigns", "show", campaignId]);
-      } catch {
-        // Commander throws on exitOverride
-      }
+      await runCommand(["campaigns", "show", campaignId]);
       return "contacts";
     }
 
     case "open": {
-      try {
-        const { buildProgram } = await import("../cli.js");
-        const program = buildProgram();
-        program.exitOverride();
-        program.configureOutput({ writeErr: () => {} });
-        await program.parseAsync(["node", "tap", "open", campaignId.slice(0, 8)]);
-      } catch {
-        // Commander throws on exitOverride
-      }
+      await runCommand(["open", campaignId]);
       return "open";
     }
 

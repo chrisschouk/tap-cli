@@ -152,6 +152,13 @@ export function navHint(hints: string[]): void {
 }
 
 /**
+ * Format a campaign label as "Artist — Name" or just "Name".
+ */
+export function campaignLabel(campaign: { artist_name?: string | null; name: string }): string {
+  return campaign.artist_name ? `${campaign.artist_name} — ${campaign.name}` : campaign.name;
+}
+
+/**
  * Format a date as "12 Mar" or "12 Mar 2025" (if different year).
  */
 export function shortDate(isoDate: string | null | undefined): string {

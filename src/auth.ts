@@ -25,6 +25,7 @@ interface TapConfig {
   supabaseKey: string;
   workspaceId?: string;
   anthropicKey?: string;
+  perplexityKey?: string;
 }
 
 let _cachedConfig: TapConfig | null | undefined;

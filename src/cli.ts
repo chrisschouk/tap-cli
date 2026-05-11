@@ -33,6 +33,12 @@ import { intro } from "./ui/format.js";
 
 export const VERSION = "0.2.0";
 
+// Restore cursor visibility if user hits Ctrl+C during a spinner
+process.on("SIGINT", () => {
+  process.stdout.write("\x1B[?25h");
+  process.exit(130);
+});
+
 /**
  * Build the Commander program with all commands registered.
  * Shared by both direct CLI invocation and interactive mode.

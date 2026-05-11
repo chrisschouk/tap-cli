@@ -15,7 +15,7 @@ import chalk from "chalk";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
 import { GLYPH, COLOUR } from "../ui/theme.js";
-import { relativeDate } from "../ui/detail.js";
+import { relativeDate, campaignLabel } from "../ui/detail.js";
 import { handleError } from "../ui/errors.js";
 
 export function watchCommand(): Command {
@@ -117,9 +117,7 @@ export function watchCommand(): Command {
                 second: "2-digit",
               });
 
-              const label = campaign.artist_name
-                ? `${campaign.artist_name} -- ${campaign.name}`
-                : campaign.name;
+              const label = campaignLabel(campaign);
 
               console.log(
                 `  ${chalk.hex(COLOUR.primary)("tap watch")} ${chalk.dim(GLYPH.divider + GLYPH.divider)} ${label} ${chalk.dim(GLYPH.dot)} last checked ${timeStr}`,
@@ -300,9 +298,7 @@ export function watchCommand(): Command {
                   const pctPitched = total > 0 ? Math.round((pitched / total) * 100) : 0;
                   const pctReplied = pitched > 0 ? Math.round((replied / pitched) * 100) : 0;
 
-                  const label = camp.artist_name
-                    ? `${camp.artist_name} -- ${camp.name}`
-                    : camp.name;
+                  const label = campaignLabel(camp);
 
                   console.log(
                     `  ${out.truncate(label, 30)?.padEnd(30)}  ${String(pctPitched).padStart(3)}% pitched  ${String(pctReplied).padStart(3)}% reply`,

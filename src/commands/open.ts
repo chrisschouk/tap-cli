@@ -48,36 +48,40 @@ export function openCommand(): Command {
         const supabase = getClient();
 
         // Check contacts first (more common use case)
+        // Support UUID prefix matching so truncated IDs work
         const { data: contact } = await supabase
           .from("tap_contacts")
           .select("id")
-          .eq("id", id)
+          .ilike("id", `${id}%`)
           .maybeSingle();
 
         if (contact) {
-          const url = `${TAP_BASE}/contacts/${id}`;
+          const fullId = contact.id;
+          const url = `${TAP_BASE}/contacts/${fullId}`;
           if (opts.url) {
             console.log(url);
           } else {
-            out.success(`Opening contact ${id.slice(0, 8)}...`);
+            out.success(`Opening contact ${fullId.slice(0, 8)}...`);
             openUrl(url);
           }
           return;
         }
 
         // Check campaigns
+        // Support UUID prefix matching so truncated IDs work
         const { data: campaign } = await supabase
           .from("tap_projects")
           .select("id")
-          .eq("id", id)
+          .ilike("id", `${id}%`)
           .maybeSingle();
 
         if (campaign) {
-          const url = `${TAP_BASE}/campaigns/${id}`;
+          const fullId = campaign.id;
+          const url = `${TAP_BASE}/campaigns/${fullId}`;
           if (opts.url) {
             console.log(url);
           } else {
-            out.success(`Opening campaign ${id.slice(0, 8)}...`);
+            out.success(`Opening campaign ${fullId.slice(0, 8)}...`);
             openUrl(url);
           }
           return;

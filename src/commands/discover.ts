@@ -25,8 +25,7 @@ function getPerplexityKey(): string | null {
   if (process.env.PERPLEXITY_API_KEY) return process.env.PERPLEXITY_API_KEY;
 
   const config = loadConfig();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const perplexityKey = (config as any)?.perplexityKey;
+  const perplexityKey = config?.perplexityKey;
   if (perplexityKey) return perplexityKey;
 
   return null;

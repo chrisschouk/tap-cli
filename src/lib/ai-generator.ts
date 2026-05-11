@@ -292,7 +292,7 @@ Generate THREE variants with different approaches:
 // PARSER
 // ============================================
 
-function parseResponse(text: string): PitchGenerateResult {
+export function parseResponse(text: string): PitchGenerateResult {
   // Extract subject
   const subjectMatch = text.match(
     /---SUBJECT---\s*([\s\S]*?)\s*---VARIANT 1---/,

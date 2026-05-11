@@ -7,6 +7,70 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+// Typed shapes matching the select() columns used in gatherPitchContext.
+// Minimal — only the fields actually accessed in this file.
+
+interface CampaignRow {
+  name: string;
+  artist_name: string | null;
+  release_name: string | null;
+  release_date: string | null;
+  goal: string | null;
+  services: string[] | null;
+  memory_what_worked: string | null;
+  memory_what_didnt: string | null;
+  memory_next_release: string | null;
+}
+
+interface ContactRow {
+  id: string;
+  name: string;
+  email: string;
+  outlet: string | null;
+  role: string | null;
+  genres: string[] | null;
+  submission_guidelines: string | null;
+  pitch_tips: string[] | null;
+  best_timing: string | null;
+  platform_type: string | null;
+  geographic_scope: string | null;
+  bbc_station: string | null;
+  enriched_at: string | null;
+}
+
+interface CampaignContactRow {
+  pitch_status: string | null;
+  last_pitched_at: string | null;
+}
+
+interface WarmthRow {
+  warmth_level: string | null;
+}
+
+interface PrevCampaignRow {
+  project_id: string;
+  tap_projects: { name: string } | { name: string }[] | null;
+}
+
+interface VoiceRow {
+  voice_background: string | null;
+  voice_style: string | null;
+  voice_typical_opener: string | null;
+  voice_approach: string | null;
+  voice_differentiator: string | null;
+  voice_achievements: string | null;
+  voice_context_notes: string | null;
+}
+
+interface PressReleaseRow {
+  content: string | null;
+}
+
+interface UnpitchedRow {
+  contact_id: string;
+  tap_contacts: UnpitchedContact | UnpitchedContact[] | null;
+}
+
 export interface PitchContext {
   // Campaign
   campaignName: string;
@@ -71,8 +135,7 @@ export async function getUnpitchedContacts(
 
   if (!data) return [];
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (data as any[])
+  return (data as UnpitchedRow[])
     .filter((r) => r.tap_contacts)
     .map((r) => {
       const c = Array.isArray(r.tap_contacts)
@@ -98,7 +161,7 @@ export async function gatherPitchContext(
   wsId: string,
 ): Promise<PitchContext> {
   // Fetch campaign + contact in parallel
-  const [campaignRes, contactRes, ccRes] = await Promise.all([
+  const [campaignRes, contactRes, ccRes, warmthRes] = await Promise.all([
     supabase
       .from("tap_projects")
       .select(
@@ -110,7 +173,7 @@ export async function gatherPitchContext(
     supabase
       .from("tap_contacts")
       .select(
-        "id, name, email, outlet, role, warmth, genres, " +
+        "id, name, email, outlet, role, genres, " +
           "submission_guidelines, pitch_tips, best_timing, " +
           "platform_type, geographic_scope, bbc_station, enriched_at",
       )
@@ -122,14 +185,18 @@ export async function gatherPitchContext(
       .eq("project_id", campaignId)
       .eq("contact_id", contactId)
       .maybeSingle(),
+    supabase
+      .from("contact_relationship_metrics")
+      .select("warmth_level")
+      .eq("contact_id", contactId)
+      .eq("workspace_id", wsId)
+      .maybeSingle(),
   ]);
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const campaign = campaignRes.data as any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const contact = contactRes.data as any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const cc = ccRes.data as any;
+  const campaign = campaignRes.data as CampaignRow | null;
+  const contact = contactRes.data as ContactRow | null;
+  const cc = ccRes.data as CampaignContactRow | null;
+  const warmthLevel = (warmthRes.data as WarmthRow | null)?.warmth_level ?? undefined;
 
   if (!campaign) throw new Error(`Campaign not found: ${campaignId}`);
   if (!contact) throw new Error(`Contact not found: ${contactId}`);
@@ -174,17 +241,16 @@ export async function gatherPitchContext(
       .maybeSingle(),
   ]);
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const previousCampaignNames =
-    (prevCampaigns as any[] | null)
+    (prevCampaigns as PrevCampaignRow[] | null)
       ?.filter((p) => p.tap_projects)
       .map((p) => {
         const proj = Array.isArray(p.tap_projects)
           ? p.tap_projects[0]
           : p.tap_projects;
-        return proj?.name as string;
+        return proj?.name;
       })
-      .filter(Boolean) || [];
+      .filter((n): n is string => Boolean(n)) || [];
 
   // Build past learnings from campaign memory
   const learningParts: string[] = [];
@@ -222,7 +288,7 @@ export async function gatherPitchContext(
     contactEmail: contact.email,
     contactOutlet: contact.outlet || undefined,
     contactRole: contact.role || undefined,
-    contactWarmth: contact.warmth || undefined,
+    contactWarmth: warmthLevel || undefined,
     contactPitchCount: pitchCount || 0,
     contactLastPitchedAt: cc?.last_pitched_at || undefined,
     contactPreviousCampaigns:
@@ -237,9 +303,7 @@ export async function gatherPitchContext(
     contactBbcStation: contact.bbc_station || undefined,
     isStaleEnrichment: isStale,
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    pressReleaseContent: (pressRelease as any)?.content || undefined,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    voiceProfile: (voiceData as any) || null,
+    pressReleaseContent: (pressRelease as PressReleaseRow | null)?.content || undefined,
+    voiceProfile: (voiceData as VoiceRow | null) as Record<string, string | null | undefined> | null,
   };
 }

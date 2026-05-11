@@ -12,7 +12,7 @@ import chalk from "chalk";
 import * as prompts from "@clack/prompts";
 import { getClient, resolveWorkspaceId } from "../auth.js";
 import * as out from "../output.js";
-import { warningBlock, navHint } from "../ui/detail.js";
+import { warningBlock, navHint, campaignLabel } from "../ui/detail.js";
 import { createRailSpinner, stepComplete, blank, summaryBar } from "../ui/format.js";
 import { handleError } from "../ui/errors.js";
 import {
@@ -172,10 +172,7 @@ export function sendCommand(): Command {
         console.log(`  ${chalk.dim("To".padEnd(12))}${contact.name || ""} <${contact.email}>`);
         console.log(`  ${chalk.dim("Subject".padEnd(12))}${pitch.subject}`);
         if (campaign) {
-          const campaignLabel = campaign.artist_name
-            ? `${campaign.artist_name} -- ${campaign.name}`
-            : campaign.name;
-          console.log(`  ${chalk.dim("Campaign".padEnd(12))}${campaignLabel}`);
+          console.log(`  ${chalk.dim("Campaign".padEnd(12))}${campaignLabel(campaign)}`);
         }
 
         blank();
@@ -254,6 +251,12 @@ export function sendCommand(): Command {
                 })
                 .eq("contact_id", pitch.contact_id)
                 .eq("project_id", pitch.campaign_id)
+            : Promise.resolve(),
+          pitch.contact_id
+            ? supabase
+                .from("tap_contacts")
+                .update({ last_contacted_at: now })
+                .eq("id", pitch.contact_id)
             : Promise.resolve(),
           supabase.from("gmail_send_logs").insert({
             workspace_id: wsId,
