@@ -33,17 +33,33 @@ Interactive mode presents a menu-driven interface for all commands — useful wh
 
 ## Authentication
 
-Before using any commands, authenticate with your TAP workspace:
+`tap-cli` 0.3+ ships two auth modes. **Use REST v1.** The legacy direct-Supabase path stays for a 30-day deprecation window only — it is removed on **14 June 2026**.
+
+### REST v1 (recommended)
 
 ```bash
-tap auth login
+tap auth login                # default flow — asks for a tap_ak_* key
 ```
 
-You'll be prompted for your Supabase URL and service role key, both available in your TAP workspace settings under Integrations.
+1. Sign in to <https://totalaudiopromo.com>
+2. Go to **Settings → API Keys** (Agency tier)
+3. Mint a key with the scopes you need. For a full agent: `campaigns:read campaigns:write pitches:read pitches:write outcomes:read outcomes:write skills:read skills:write approvals:read webhooks:read webhooks:write enrich validate`. For a read-only audit agent: just the `:read` scopes.
+4. Paste the `tap_ak_…` key when prompted.
 
-Alternatively, set environment variables (see [Configuration](#configuration) below).
+Credentials are stored at `~/.tap/config.json` (chmod 600). The CLI proxies every call through `https://totalaudiopromo.com/api/v1/*` — no Supabase credentials touch your machine.
 
-Credentials are stored at `~/.tap/config.json` (chmod 600).
+### Legacy (deprecated)
+
+```bash
+tap auth login --legacy       # direct-Supabase, removed 14 June 2026
+```
+
+A stderr deprecation banner prints whenever a command falls back to this path. Migrate to REST mode before the cut-off.
+
+### Sibling tools
+
+- **MCP server**: `npx -y @totalaudiopromo/tap-mcp@latest` — same `tap_ak_*` key, same REST proxying. Use this for Claude Code / Cursor / Hermes integrations.
+- **sink-cli**: contact discovery + signals layer. See `sink-cli` README. The vision is `sink discover ... | sink signals ... | tap import` as one pipeline.
 
 ---
 
@@ -62,9 +78,37 @@ tap
 ### `tap auth` — authentication
 
 ```bash
-tap auth login     # store credentials interactively
-tap auth status    # check current auth state
+tap auth login              # REST v1 (default)
+tap auth login --legacy     # deprecated direct-Supabase
+tap auth status             # show current auth mode + scopes
 ```
+
+---
+
+### `tap skill` — workspace skill management
+
+Power-user terminal entry point for the same skill set Claude Code agents drive via the MCP server's `tap_list_skills` / `tap_get_skill` / `tap_run_skill` / `tap_fork_skill` / `tap_get_invocation` tools.
+
+```bash
+tap skill list                          # every skill visible to this workspace
+tap skill list --json                   # JSON output
+
+tap skill view draft-pitches            # manifest + resolved body
+tap skill view radio-outreach --body-only
+
+tap skill run fact-check --input '{"campaign_id":"abc"}'
+tap skill run draft-pitches --input-file ./inputs/pitches.json
+tap skill run voice-check --input '{...}' --json
+
+tap skill edit draft-pitches            # opens $EDITOR on the body, saves as workspace fork
+tap skill reset draft-pitches           # drops the workspace fork, restores TAP default
+
+tap skill invocation <invocation-id>    # audit row inspector
+```
+
+**`run` exit codes:** `0` on success, `1` when the skill failed (server returned `ok: false`) or any error. The audit row is written either way — fetch it with `tap skill invocation <id>`.
+
+`tap skill` is REST-only. It does not fall through to the legacy Supabase path.
 
 ---
 

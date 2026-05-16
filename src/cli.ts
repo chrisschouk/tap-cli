@@ -29,9 +29,10 @@ import { sendCommand } from "./commands/send.js";
 import { discoverCommand } from "./commands/discover.js";
 import { importCommand } from "./commands/import.js";
 import { watchCommand } from "./commands/watch.js";
+import { skillCommand } from "./commands/skill.js";
 import { intro } from "./ui/format.js";
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 
 // Restore cursor visibility if user hits Ctrl+C during a spinner
 process.on("SIGINT", () => {
@@ -63,6 +64,7 @@ export function buildProgram(): Command {
   program.addCommand(openCommand());
   program.addCommand(queueCommand());
   program.addCommand(sendCommand());
+  program.addCommand(skillCommand());
   program.addCommand(statsCommand());
   program.addCommand(watchCommand());
 
