@@ -1,7 +1,7 @@
 {
   "name": "@totalaudiopromo/tap-cli",
-  "version": "0.2.0",
-  "description": "CLI for Total Audio Platform — manage campaigns, contacts, and pitches from the terminal",
+  "version": "0.3.0",
+  "description": "CLI for Total Audio Platform — manage campaigns, contacts, pitches, and workspace skills from the terminal. 0.3 routes auth through REST v1 with workspace-scoped tap_ak_* keys.",
   "license": "MIT",
   "type": "module",
   "bin": {
