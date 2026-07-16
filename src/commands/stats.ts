@@ -7,7 +7,7 @@
 
 import { Command } from "commander";
 import chalk from "chalk";
-import { getClient, resolveWorkspaceId } from "../auth.js";
+import { getClient, resolveWorkspaceId, hasApiKey } from "../auth.js";
 import * as out from "../output.js";
 import { sectionHeader, sparkbar, percentage, navHint, ansiPadEnd } from "../ui/detail.js";
 import { handleError } from "../ui/errors.js";
@@ -22,6 +22,12 @@ export function statsCommand(): Command {
       const spinner = out.spinner("Loading stats...");
 
       try {
+        if (hasApiKey()) {
+          spinner.stop();
+          out.error("Stats command is not supported in REST mode. For security and token scoping, use legacy configuration mode (SUPABASE_URL + SUPABASE_KEY) or view the analytics dashboards on the TAP web portal.");
+          process.exit(1);
+        }
+
         const supabase = getClient();
         const wsId = await resolveWorkspaceId(supabase, opts.workspace);
 
@@ -99,173 +105,76 @@ export function statsCommand(): Command {
           warm: 0,
           neutral: 0,
           cold: 0,
-          over_pitched: 0,
         };
-        let totalResponseRate = 0;
-        let totalAvgDays = 0;
-        let avgDaysCount = 0;
+        let responseRates: number[] = [];
+        let avgDays: number[] = [];
 
         for (const m of metrics) {
           if (m.warmth_level && warmthDist[m.warmth_level] !== undefined) {
             warmthDist[m.warmth_level]++;
           }
-          totalResponseRate += m.response_rate || 0;
-          if (m.avg_response_days !== null) {
-            totalAvgDays += m.avg_response_days;
-            avgDaysCount++;
-          }
+          if (m.response_rate !== null) responseRates.push(m.response_rate);
+          if (m.avg_response_days !== null) avgDays.push(m.avg_response_days);
         }
 
-        const metricsTotal = metrics.length || 1;
-        const avgResponseRate = totalResponseRate / metricsTotal;
-        const avgResponseDays = avgDaysCount > 0 ? totalAvgDays / avgDaysCount : null;
-
-        // Top contacts by response rate (min 3 pitches)
-        const topContacts = metrics
-          .filter((m) => m.total_pitches >= 3)
-          .sort((a, b) => (b.response_rate || 0) - (a.response_rate || 0))
-          .slice(0, 5);
-
-        // Resolve top contact names
-        let topContactDetails: Array<{
-          name: string;
-          outlet: string | null;
-          response_rate: number;
-          warmth_level: string | null;
-        }> = [];
-
-        if (topContacts.length > 0) {
-          const contactIds = topContacts.map((m) => m.contact_id);
-          const { data: contactData } = await supabase
-            .from("tap_contacts")
-            .select("id, name, outlet")
-            .in("id", contactIds);
-
-          const contactMap = new Map(
-            (contactData || []).map((c) => [c.id, c]),
-          );
-
-          topContactDetails = topContacts.map((m) => {
-            const contact = contactMap.get(m.contact_id);
-            return {
-              name: contact?.name || "Unknown",
-              outlet: contact?.outlet || null,
-              response_rate: m.response_rate || 0,
-              warmth_level: m.warmth_level,
-            };
-          });
-        }
-
-        // Outcome distribution
-        const outcomeDist: Record<string, number> = {};
-        for (const o of outcomes) {
-          outcomeDist[o.outcome_type] = (outcomeDist[o.outcome_type] || 0) + 1;
-        }
+        // Calculations
+        const avgResponse = responseRates.length > 0
+          ? responseRates.reduce((a, b) => a + b, 0) / responseRates.length
+          : 0;
+        const avgResponseDays = avgDays.length > 0
+          ? avgDays.reduce((a, b) => a + b, 0) / avgDays.length
+          : 0;
 
         if (opts.json) {
           out.json({
-            contacts: {
-              total: totalContacts || 0,
-              enriched: enrichedContacts || 0,
-            },
-            campaigns: {
-              total: totalCampaigns || 0,
-              active: activeCampaigns || 0,
-            },
-            outcomes: totalOutcomes || 0,
-            pitches: totalPitches || 0,
-            coverage: {
-              total: totalCoverage || 0,
-              last30Days: recentCoverage || 0,
-            },
-            warmthDistribution: warmthDist,
-            avgResponseRate,
-            avgResponseDays,
-            topContacts: topContactDetails,
-            outcomeDistribution: outcomeDist,
+            contacts: { total: totalContacts, enriched: enrichedContacts },
+            campaigns: { total: totalCampaigns, active: activeCampaigns },
+            outcomes: { total: totalOutcomes },
+            pitches: { total: totalPitches },
+            coverage: { total: totalCoverage, recent30d: recentCoverage },
+            metrics: { avgResponse, avgResponseDays, warmth: warmthDist },
           });
           return;
         }
 
-        // -- Overview --
-        sectionHeader("TAP Workspace Stats");
+        // Print Stats Overview
+        console.log("");
+        console.log(chalk.bold("  Workspace Overview"));
+        console.log(chalk.dim("  " + "\u2500".repeat(52)));
 
-        sectionHeader("Overview");
-        const tc = totalContacts || 0;
-        const ec = enrichedContacts || 0;
-        const enrichRate = tc > 0 ? Math.round((ec / tc) * 100) : 0;
-        console.log(
-          `  ${"Contacts".padEnd(18)}${chalk.cyan(tc)} total, ${chalk.green(ec)} enriched (${enrichRate}%)`,
-        );
-        console.log(
-          `  ${"Campaigns".padEnd(18)}${chalk.cyan(totalCampaigns || 0)} total, ${chalk.green(activeCampaigns || 0)} active`,
-        );
-        console.log(
-          `  ${"Pitches".padEnd(18)}${chalk.cyan(totalPitches || 0)} drafts`,
-        );
-        console.log(
-          `  ${"Outcomes".padEnd(18)}${chalk.cyan(totalOutcomes || 0)} logged`,
-        );
-        console.log(
-          `  ${"Coverage".padEnd(18)}${chalk.cyan(totalCoverage || 0)} clips${recentCoverage ? ` (${recentCoverage} this month)` : ""}`,
-        );
+        console.log(`  ${chalk.dim("Contacts")}        ${totalContacts} (${percentage((enrichedContacts || 0) / (totalContacts || 1))} enriched)`);
+        console.log(`  ${chalk.dim("Campaigns")}       ${totalCampaigns} (${activeCampaigns} active)`);
+        console.log(`  ${chalk.dim("Outcomes logged")} ${totalOutcomes}`);
+        console.log(`  ${chalk.dim("Coverage clips")}  ${totalCoverage} (${recentCoverage} in last 30 days)`);
 
-        // -- Warmth Distribution --
-        if (metrics.length > 0) {
-          sectionHeader("Warmth Distribution");
-          const warmthOrder = ["hot", "warm", "neutral", "cold", "over_pitched"] as const;
-          for (const level of warmthOrder) {
-            const count = warmthDist[level];
-            if (count === 0 && level === "over_pitched") continue;
-            const ratio = count / metricsTotal;
-            const pct = Math.round(ratio * 100);
-            const badge = out.warmthBadge(level);
-            console.log(
-              `  ${ansiPadEnd(badge, 22)}${sparkbar(ratio)}  ${String(count).padStart(4)} (${pct}%)`,
-            );
-          }
+        // Warmth
+        sectionHeader("Warmth Distribution");
+        const totalWithWarmth = Object.values(warmthDist).reduce((a, b) => a + b, 0);
+        for (const [level, count] of Object.entries(warmthDist)) {
+          const ratio = totalWithWarmth > 0 ? count / totalWithWarmth : 0;
+          console.log(`  ${ansiPadEnd(out.warmthBadge(level), 18)}${sparkbar(ratio)}  ${String(count).padStart(4)}`);
         }
 
-        // -- Response Rates --
-        if (metrics.length > 0) {
-          sectionHeader("Response Rates");
-          console.log(
-            `  ${"Overall".padEnd(18)}${percentage(avgResponseRate)}`,
-          );
-          if (avgResponseDays !== null) {
-            console.log(
-              `  ${"Avg response".padEnd(18)}${avgResponseDays.toFixed(1)} days`,
-            );
-          }
-        }
+        // Engagement
+        sectionHeader("Engagement Metrics");
+        console.log(`  ${chalk.dim("Avg reply rate")}   ${percentage(avgResponse)}`);
+        console.log(`  ${chalk.dim("Avg reply time")}   ${avgResponseDays > 0 ? avgResponseDays.toFixed(1) + " days" : "—"}`);
 
-        // -- Top Contacts --
-        if (topContactDetails.length > 0) {
-          sectionHeader("Top Contacts", "min 3 pitches");
-          for (const c of topContactDetails) {
-            console.log(
-              `  ${(out.truncate(c.name, 18) || "").padEnd(18)}  ${(out.truncate(c.outlet, 16) || chalk.dim("\u2014")).padEnd(16)}  ${ansiPadEnd(percentage(c.response_rate) || "", 8)}  ${out.warmthBadge(c.warmth_level)}`,
-            );
+        // Outcomes
+        if (outcomes.length > 0) {
+          sectionHeader("Outcomes Breakdown");
+          const outcomeDist: Record<string, number> = {};
+          for (const o of outcomes) {
+            outcomeDist[o.outcome_type] = (outcomeDist[o.outcome_type] || 0) + 1;
           }
-        }
-
-        // -- Outcome Distribution --
-        if (Object.keys(outcomeDist).length > 0) {
-          sectionHeader("Outcome Distribution");
           const sorted = Object.entries(outcomeDist).sort(([, a], [, b]) => b - a);
           for (const [type, count] of sorted) {
-            const ratio = count / (totalOutcomes || 1);
-            console.log(
-              `  ${type.replace(/_/g, " ").padEnd(18)}${sparkbar(ratio)}  ${String(count).padStart(4)}`,
-            );
+            const ratio = count / outcomes.length;
+            console.log(`  ${ansiPadEnd(type.replace(/_/g, " "), 18)}${sparkbar(ratio)}  ${String(count).padStart(4)}`);
           }
         }
 
-        navHint([
-          "tap queue",
-          "tap campaigns list",
-          "tap contacts list --warm",
-        ]);
+        navHint(["tap campaigns list", "tap contacts list"]);
         blank();
       } catch (err) {
         spinner.stop();

@@ -8,7 +8,8 @@
  */
 
 import { Command } from "commander";
-import { getClient, resolveWorkspaceId } from "../auth.js";
+import { getClient, resolveWorkspaceId, hasApiKey } from "../auth.js";
+import { restRequest } from "../lib/rest.js";
 import * as out from "../output.js";
 import { handleError } from "../ui/errors.js";
 import { navHint } from "../ui/detail.js";
@@ -46,6 +47,46 @@ Examples:
       const spinner = out.spinner("Logging outcome...");
 
       try {
+        if (hasApiKey()) {
+          if (opts.dryRun) {
+            spinner.stop();
+            out.info(`Dry run -- would log "${type}" for contact ${contactId} in campaign ${campaignId}`);
+            if (opts.notes) out.info(`Notes: ${opts.notes}`);
+            return;
+          }
+
+          const res = await restRequest<{ id: string }>("/api/v1/outcomes", {
+            method: "POST",
+            body: {
+              campaign_id: campaignId,
+              contact_id: contactId,
+              outcome_type: type,
+              notes: opts.notes || undefined,
+              channel: opts.channel || undefined,
+            },
+          });
+
+          spinner.stop();
+
+          if (opts.json) {
+            out.json({
+              id: res.id,
+              type,
+              campaignId,
+              contactId,
+            });
+            return;
+          }
+
+          out.success(`Outcome logged: ${type}`);
+          if (opts.notes) {
+            out.info(`Notes: ${opts.notes}`);
+          }
+          navHint(["tap queue"]);
+          blank();
+          return;
+        }
+
         const supabase = getClient();
         const wsId = await resolveWorkspaceId(supabase, opts.workspace);
         const statuses = mapOutcomeToStatuses(type as OutcomeType);

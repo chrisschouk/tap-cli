@@ -12,7 +12,8 @@ import { Command } from "commander";
 import chalk from "chalk";
 import * as prompts from "@clack/prompts";
 import { readFileSync } from "node:fs";
-import { getClient, resolveWorkspaceId } from "../auth.js";
+import { getClient, resolveWorkspaceId, hasApiKey } from "../auth.js";
+import { restRequest } from "../lib/rest.js";
 import * as out from "../output.js";
 import { COLOUR } from "../ui/theme.js";
 import { createRailSpinner, stepComplete, blank, summaryBar } from "../ui/format.js";
@@ -224,6 +225,89 @@ export function importCommand(): Command {
         }
 
         parseRail.succeed(`Parsing                  ${totalRecords} records (${sourceLabel})`);
+
+        if (hasApiKey()) {
+          const payloadContacts = contacts.map(c => ({
+            name: c.name,
+            email: c.email,
+            outlet: c.outlet,
+            role: c.role,
+            genres: c.genres,
+            platform_type: c.platform_type,
+            bbc_station: (c as any).bbc_station,
+          }));
+
+          if (opts.dryRun) {
+            out.info(`Dry run -- would import ${payloadContacts.length} contacts`);
+            return;
+          }
+
+          // Confirmation
+          if (!opts.yes) {
+            const confirmed = await prompts.confirm({
+              message: `Import ${payloadContacts.length} contacts?`,
+            });
+            if (prompts.isCancel(confirmed) || !confirmed) {
+              console.log(chalk.dim("  Cancelled."));
+              return;
+            }
+          }
+
+          const importRail = createRailSpinner(`Importing ${payloadContacts.length} contacts`).start();
+
+          const res = await restRequest<{
+            imported: number;
+            results: Array<{ email: string; status: string; reason?: string }>;
+          }>("/api/v1/contacts", {
+            method: "POST",
+            body: {
+              contacts: payloadContacts,
+            },
+          });
+
+          importRail.succeed(`Imported                ${res.imported} contacts`);
+
+          const skipped = res.results.filter(r => r.status === 'skipped');
+          if (skipped.length > 0) {
+            out.warn(`${skipped.length} duplicate or invalid contacts skipped`);
+          }
+
+          if (opts.campaign && res.imported > 0) {
+            const searchEmails = payloadContacts.map(c => c.email);
+            const contactsRes = await restRequest<{ contacts: any[] }>("/api/v1/contacts", {
+              query: { limit: 100 },
+            });
+            const importedIds = contactsRes.contacts
+              .filter(c => searchEmails.includes(c.email))
+              .map(c => c.id);
+
+            if (importedIds.length > 0) {
+              const linkRail = createRailSpinner(`Linking to campaign`).start();
+              await restRequest(`/api/v1/campaigns/${encodeURIComponent(opts.campaign)}/contacts`, {
+                method: "POST",
+                body: {
+                  contact_ids: importedIds,
+                },
+              });
+              linkRail.succeed(`Linked contacts to campaign`);
+            }
+          }
+
+          if (opts.enrich) {
+            out.warn("Forcing enrichment queueing is not supported in REST mode.");
+          }
+
+          if (opts.json) {
+            out.json(res);
+            return;
+          }
+
+          blank();
+          summaryBar([`${res.imported} imported`, `${skipped.length} skipped`]);
+          navHint(["tap queue"]);
+          blank();
+          return;
+        }
 
         // Deduplicate against workspace
         const dedupRail = createRailSpinner("Deduplicating").start();

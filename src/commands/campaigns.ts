@@ -5,7 +5,8 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import * as prompts from "@clack/prompts";
-import { getClient, resolveWorkspaceId } from "../auth.js";
+import { getClient, resolveWorkspaceId, hasApiKey } from "../auth.js";
+import { restRequest } from "../lib/rest.js";
 import * as out from "../output.js";
 import { GLYPH, COLOUR, WARMTH_COLOUR } from "../ui/theme.js";
 import { sectionHeader, sparkbar, shortDate, navHint, ansiPadEnd } from "../ui/detail.js";
@@ -50,6 +51,102 @@ export async function showCampaign(
   const spinner = out.spinner("Loading campaign...");
 
   try {
+    if (hasApiKey()) {
+      const res = await restRequest<{
+        campaign: any;
+        stats: any;
+      }>(`/api/v1/campaigns/${encodeURIComponent(id)}`);
+
+      const contactsRes = await restRequest<{
+        contacts: any[];
+      }>(`/api/v1/campaigns/${encodeURIComponent(id)}/contacts`, {
+        query: { limit: 100 },
+      });
+
+      const outcomesRes = await restRequest<{
+        outcomes: any[];
+      }>("/api/v1/outcomes", {
+        query: { campaign_id: id, limit: 100 },
+      });
+
+      spinner.stop();
+
+      const campaign = res.campaign;
+      const contacts = contactsRes.contacts;
+      const outcomes = outcomesRes.outcomes;
+
+      if (opts.json) {
+        out.json({ campaign, contacts, outcomes });
+        return;
+      }
+
+      // -- Header --
+      console.log("");
+      console.log(
+        `  ${chalk.bold(campaign.name)}  ${out.statusBadge(campaign.status)}`,
+      );
+      if (campaign.artist_name) {
+        console.log(`  ${chalk.dim("Artist")}  ${campaign.artist_name}`);
+      }
+      if (campaign.release_title) {
+        console.log(`  ${chalk.dim("Release")} ${campaign.release_title}`);
+      }
+      if (campaign.release_date) {
+        const d = new Date(campaign.release_date).toLocaleDateString("en-GB", {
+          day: "numeric",
+          month: "long",
+          year: "numeric",
+        });
+        console.log(`  ${chalk.dim("Date")}    ${d}`);
+      }
+      if (campaign.goal) {
+        console.log(`  ${chalk.dim("Goal")}    ${campaign.goal}`);
+      }
+
+      // -- Contact table --
+      if (contacts.length > 0) {
+        const rows = contacts.map((c) => [
+          out.truncate(c.contact?.name || c.contact?.email || "", 22),
+          out.truncate(c.contact?.outlet || "", 16) || "—",
+          out.pitchStatusBadge(c.pitch_status),
+          shortDate(c.last_pitched_at),
+        ]);
+
+        console.log("");
+        out.table(["Name", "Outlet", "Pitch Status", "Last Pitched"], rows);
+      }
+
+      // -- Health --
+      const total = contacts.length;
+      console.log("");
+      sectionHeader("Health");
+      console.log(
+        `  ${chalk.dim("Contacts")} ${total}  ${chalk.dim(GLYPH.dot)}  ` +
+          `${chalk.dim("Pitched")} ${chalk.hex(COLOUR.primary)(`${res.stats?.pitched_count ?? 0}`)}  ${chalk.dim(GLYPH.dot)}  ` +
+          `${chalk.dim("Replied")} ${chalk.hex(COLOUR.success)(`${res.stats?.replied_count ?? 0}`)}`
+      );
+
+      // outcomes mapping
+      if (outcomes.length > 0) {
+        sectionHeader("Outcomes", `${outcomes.length}`);
+        const outcomeDist: Record<string, number> = {};
+        for (const o of outcomes) {
+          outcomeDist[o.outcome_type] = (outcomeDist[o.outcome_type] || 0) + 1;
+        }
+        const sorted = Object.entries(outcomeDist).sort(([, a], [, b]) => b - a);
+        for (const [type, count] of sorted) {
+          const ratio = count / outcomes.length;
+          console.log(
+            `  ${ansiPadEnd(type.replace(/_/g, " "), 18)}${sparkbar(ratio)}  ${String(count).padStart(4)}`,
+          );
+        }
+      }
+
+      navHint([`tap open ${id.slice(0, 8)}`]);
+      console.log("");
+      return;
+    }
+
     const supabase = getClient();
 
     // Fetch campaign + contacts + outcomes + coverage in parallel
@@ -161,7 +258,7 @@ export async function showCampaign(
           const contact = contactMap.get(c.contact_id);
           return [
             out.truncate(contact?.name || c.contact_id.slice(0, 8), 22),
-            out.truncate(contact?.outlet, 16) || "\u2014",
+            out.truncate(contact?.outlet, 16) || "—",
             out.pitchStatusBadge(c.pitch_status),
             shortDate(c.last_pitched_at),
           ];
@@ -320,6 +417,40 @@ Examples:
       const spinner = out.spinner("Fetching campaigns...");
 
       try {
+        if (hasApiKey()) {
+          const res = await restRequest<{ campaigns: any[]; total: number }>("/api/v1/campaigns", {
+            query: { status: opts.status },
+          });
+
+          spinner.stop();
+
+          if (opts.json) {
+            out.json(res.campaigns);
+            return;
+          }
+
+          if (res.campaigns.length === 0) {
+            out.info("No campaigns found");
+            return;
+          }
+
+          out.table(
+            ["Name", "Artist", "Status", "Release", "Warmth"],
+            res.campaigns.map((c) => [
+              out.truncate(c.name, 28),
+              out.truncate(c.artist_name, 18) || "—",
+              out.statusBadge(c.status),
+              c.release_date || "—",
+              "—", // Warmth breakdown not available via REST v1 list campaigns endpoint
+            ]),
+          );
+
+          out.info(`${res.campaigns.length} campaigns`);
+          navHint(["tap campaigns show <id>", "tap queue"]);
+          blank();
+          return;
+        }
+
         const supabase = getClient();
         const wsId = await resolveWorkspaceId(supabase, opts.workspace);
 
@@ -392,20 +523,20 @@ Examples:
           ["Name", "Artist", "Status", "Release", "Warmth"],
           data.map((c) => {
             const counts = campaignWarmth.get(c.id);
-            let warmthCol = chalk.dim("\u2014");
+            let warmthCol = chalk.dim("—");
             if (counts) {
               const parts: string[] = [];
               if (counts.hot) parts.push(chalk.hex(WARMTH_COLOUR.hot)(`${counts.hot}h`));
               if (counts.warm) parts.push(chalk.hex(WARMTH_COLOUR.warm)(`${counts.warm}w`));
               if (counts.neutral) parts.push(chalk.hex(WARMTH_COLOUR.neutral)(`${counts.neutral}n`));
               if (counts.cold) parts.push(chalk.hex(WARMTH_COLOUR.cold)(`${counts.cold}c`));
-              warmthCol = parts.length > 0 ? parts.join(" ") : chalk.dim("\u2014");
+              warmthCol = parts.length > 0 ? parts.join(" ") : chalk.dim("—");
             }
             return [
               out.truncate(c.name, 28),
-              out.truncate(c.artist_name, 18) || "\u2014",
+              out.truncate(c.artist_name, 18) || "—",
               out.statusBadge(c.status),
-              c.release_date || "\u2014",
+              c.release_date || "—",
               warmthCol,
             ];
           }),
@@ -451,6 +582,28 @@ Examples:
       const spinner = out.spinner("Creating campaign...");
 
       try {
+        if (hasApiKey()) {
+          const res = await restRequest<{ campaign: any }>("/api/v1/campaigns", {
+            method: "POST",
+            body: {
+              name: opts.name,
+              artist_name: opts.artist,
+              release_title: opts.release,
+              release_date: opts.date,
+              services: opts.channels ? opts.channels.split(",") : undefined,
+            },
+          });
+
+          spinner.stop();
+          out.success(`Campaign "${res.campaign.name}" created (${res.campaign.id})`);
+          navHint([
+            `tap campaigns show ${res.campaign.id.slice(0, 8)}`,
+            "tap contacts search \"...\"",
+          ]);
+          blank();
+          return;
+        }
+
         const supabase = getClient();
         const wsId = await resolveWorkspaceId(supabase, opts.workspace);
 
@@ -515,6 +668,17 @@ Examples:
       const spinner = out.spinner("Updating status...");
 
       try {
+        if (hasApiKey()) {
+          await restRequest(`/api/v1/campaigns/${encodeURIComponent(id)}`, {
+            method: "PATCH",
+            body: { status },
+          });
+
+          spinner.stop();
+          out.success(`Campaign ${id} ${GLYPH.arrow} ${out.statusBadge(status)}`);
+          return;
+        }
+
         const supabase = getClient();
 
         const { data, error } = await supabase

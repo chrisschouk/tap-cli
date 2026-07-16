@@ -13,7 +13,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import * as prompts from "@clack/prompts";
-import { getClient, resolveWorkspaceId, loadConfig } from "../auth.js";
+import { getClient, resolveWorkspaceId, loadConfig, hasApiKey } from "../auth.js";
 import * as out from "../output.js";
 import { GLYPH } from "../ui/theme.js";
 import { sectionHeader, percentage, navHint } from "../ui/detail.js";
@@ -65,6 +65,11 @@ export function discoverCommand(): Command {
       const searchRail = createRailSpinner(`Searching "${searchTerm}"`).start();
 
       try {
+        if (hasApiKey()) {
+          searchRail.fail("Discover command is not supported in REST mode. For contact prospecting, use legacy configuration mode or run your scans directly on the Perplexity portal.");
+          process.exit(1);
+        }
+
         const supabase = getClient();
         const wsId = await resolveWorkspaceId(supabase, opts.workspace);
 

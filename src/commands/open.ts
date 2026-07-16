@@ -10,7 +10,8 @@
 import { Command } from "commander";
 import { exec } from "node:child_process";
 import { platform } from "node:os";
-import { getClient } from "../auth.js";
+import { getClient, hasApiKey } from "../auth.js";
+import { restRequest } from "../lib/rest.js";
 import * as out from "../output.js";
 import { handleError } from "../ui/errors.js";
 
@@ -45,6 +46,56 @@ export function openCommand(): Command {
       }
 
       try {
+        if (hasApiKey()) {
+          let resolvedUrl: string | null = null;
+          let fullId = id;
+
+          // If id is shorter than 36, try fetching lists and looking for prefix
+          if (id.length < 36) {
+            // Check contacts first
+            const contactsRes = await restRequest<{ contacts: any[] }>("/api/v1/contacts", {
+              query: { limit: 100 },
+            });
+            const foundContact = contactsRes.contacts.find(c => c.id.startsWith(id));
+            if (foundContact) {
+              fullId = foundContact.id;
+              resolvedUrl = `${TAP_BASE}/contacts/${fullId}`;
+            } else {
+              // Check campaigns
+              const campaignsRes = await restRequest<{ campaigns: any[] }>("/api/v1/campaigns");
+              const foundCampaign = campaignsRes.campaigns.find(c => c.id.startsWith(id));
+              if (foundCampaign) {
+                fullId = foundCampaign.id;
+                resolvedUrl = `${TAP_BASE}/campaigns/${fullId}`;
+              }
+            }
+          } else {
+            // Full UUID, try querying contact detail
+            try {
+              await restRequest(`/api/v1/contacts/${encodeURIComponent(id)}`);
+              resolvedUrl = `${TAP_BASE}/contacts/${id}`;
+            } catch {
+              try {
+                await restRequest(`/api/v1/campaigns/${encodeURIComponent(id)}`);
+                resolvedUrl = `${TAP_BASE}/campaigns/${id}`;
+              } catch {}
+            }
+          }
+
+          if (resolvedUrl) {
+            if (opts.url) {
+              console.log(resolvedUrl);
+            } else {
+              out.success(`Opening TAP item ${fullId.slice(0, 8)}...`);
+              openUrl(resolvedUrl);
+            }
+            return;
+          }
+
+          out.error(`No contact or campaign found with ID: ${id}`);
+          process.exit(1);
+        }
+
         const supabase = getClient();
 
         // Check contacts first (more common use case)

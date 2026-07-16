@@ -8,7 +8,8 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import * as prompts from "@clack/prompts";
-import { getClient, resolveWorkspaceId } from "../auth.js";
+import { getClient, resolveWorkspaceId, hasApiKey } from "../auth.js";
+import { restRequest } from "../lib/rest.js";
 import * as out from "../output.js";
 import { GLYPH } from "../ui/theme.js";
 import { relativeDate, navHint, campaignLabel } from "../ui/detail.js";
@@ -26,6 +27,58 @@ export function queueCommand(): Command {
       const spinner = out.spinner("Loading action queue...");
 
       try {
+        if (hasApiKey()) {
+          const res = await restRequest<{ actions: any[] }>("/api/v1/actions");
+          spinner.stop();
+
+          if (opts.json) {
+            out.json(res);
+            return;
+          }
+
+          // Header
+          console.log("");
+          console.log(
+            `  ${chalk.bold("Action Queue")} ${chalk.dim(GLYPH.divider + GLYPH.divider)} ${new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })}`,
+          );
+          console.log(chalk.dim(`  ${GLYPH.divider.repeat(52)}`));
+
+          const followUps = res.actions.filter(a => a.type === 'follow_up');
+          const enrichment = res.actions.filter(a => a.type === 'enrichment');
+
+          if (followUps.length > 0) {
+            console.log("");
+            console.log(
+              `  ${chalk.bold("Follow-ups Needed")} (${followUps.length})${" ".repeat(Math.max(1, 24 - String(followUps.length).length))}${chalk.red.bold("HIGH")}`,
+            );
+            console.log(chalk.dim(`  ${GLYPH.divider.repeat(52)}`));
+            for (const f of followUps) {
+              console.log(`  ${chalk.dim(GLYPH.dot)} ${f.description}`);
+            }
+          }
+
+          if (enrichment.length > 0) {
+            console.log("");
+            console.log(
+              `  ${chalk.bold("Enrichment")} (${enrichment.length})${" ".repeat(Math.max(1, 31 - String(enrichment.length).length))}${chalk.dim("LOW")}`,
+            );
+            console.log(chalk.dim(`  ${GLYPH.divider.repeat(52)}`));
+            for (const e of enrichment) {
+              console.log(`  ${chalk.dim(GLYPH.dot)} ${e.description}`);
+            }
+          }
+
+          if (res.actions.length === 0) {
+            out.success("Queue is clear. Nice work.");
+          }
+
+          navHint([
+            "tap campaigns show <id>",
+          ]);
+          blank();
+          return;
+        }
+
         const supabase = getClient();
         const wsId = await resolveWorkspaceId(supabase, opts.workspace);
 

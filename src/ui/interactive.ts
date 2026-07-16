@@ -12,7 +12,7 @@ import { intro, blank } from "./format.js";
 import { runCommand } from "./run-command.js";
 import { GLYPH } from "./theme.js";
 import { VERSION } from "../cli.js";
-import { getClient, resolveWorkspaceId } from "../auth.js";
+import { getClient, resolveWorkspaceId, hasApiKey } from "../auth.js";
 import { showContact, showHistory } from "../commands/contacts.js";
 import { showCampaign } from "../commands/campaigns.js";
 import * as out from "../output.js";
@@ -36,6 +36,11 @@ let hintsCachedAt = 0;
 const HINTS_TTL = 60_000; // 60 seconds
 
 export async function runInteractive(): Promise<void> {
+  if (hasApiKey()) {
+    console.log(chalk.yellow("\nInteractive mode is not supported in REST mode. Please use direct commands (e.g. tap campaigns list, tap contacts show <id>)."));
+    process.exit(0);
+  }
+
   // Fetch context stats before rendering intro
   let contextBar: { contacts: number; campaigns: number; followUps: number } | null = null;
 
