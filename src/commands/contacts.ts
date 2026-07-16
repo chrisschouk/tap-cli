@@ -5,7 +5,8 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import * as prompts from "@clack/prompts";
-import { getClient, resolveWorkspaceId } from "../auth.js";
+import { getClient, resolveWorkspaceId, hasApiKey } from "../auth.js";
+import { restRequest } from "../lib/rest.js";
 import * as out from "../output.js";
 import {
   fetchContactFull,
@@ -118,6 +119,70 @@ export async function showContact(
   const spinner = out.spinner("Loading contact...");
 
   try {
+    if (hasApiKey()) {
+      let resolvedId = contactId;
+      if (contactId.includes("@")) {
+        const searchRes = await restRequest<{ contacts: any[] }>("/api/v1/contacts", {
+          query: { search: contactId },
+        });
+        const found = searchRes.contacts.find(c => c.email.toLowerCase() === contactId.toLowerCase().trim());
+        if (!found) {
+          spinner.stop();
+          out.error(`No contact found with email: ${contactId}`);
+          process.exit(1);
+        }
+        resolvedId = found.id;
+      }
+
+      const contactRes = await restRequest<{ contact: any }>(`/api/v1/contacts/${encodeURIComponent(resolvedId)}`);
+      const outcomesRes = await restRequest<{ outcomes: any[] }>("/api/v1/outcomes", {
+        query: { contact_id: resolvedId, limit: 10 },
+      });
+
+      spinner.stop();
+      const contact = contactRes.contact;
+      const outcomes = outcomesRes.outcomes || [];
+
+      if (opts.json) {
+        out.json({ contact, outcomes });
+        return;
+      }
+
+      console.log("");
+      console.log(`  ${chalk.bold(contact.name || contact.email)}`);
+      const headerParts = [
+        contact.outlet,
+        contact.role,
+        contact.email,
+      ].filter(Boolean);
+      console.log(`  ${chalk.dim(headerParts.join("  ·  "))}`);
+      console.log(chalk.dim(`  ${"\u2500".repeat(52)}`));
+
+      // Intelligence
+      sectionHeader("Intelligence");
+      console.log(field("Platform", contact.platform_type));
+      console.log(fieldList("Genres", contact.genres));
+      console.log(field("Best timing", contact.best_timing));
+      console.log(field("Enriched", relativeDate(contact.enriched_at)));
+
+      // Recent outcomes
+      if (outcomes.length > 0) {
+        sectionHeader("Recent Outcomes", `${outcomes.length}`);
+        for (const o of outcomes) {
+          console.log(
+            `  ${ansiPadEnd(out.pitchStatusBadge(o.outcome_type) || "", 14)}  ${shortDate(o.occurred_at)}`,
+          );
+          if (o.notes) {
+            console.log(`    ${chalk.dim(`"${out.truncate(o.notes, 50)}"`)}`);
+          }
+        }
+      }
+
+      navHint([`tap contacts show ${contact.id.slice(0, 8)}`]);
+      console.log("");
+      return;
+    }
+
     const supabase = getClient();
 
     // If it looks like an email, resolve to ID
@@ -554,6 +619,54 @@ Examples:
       const spinner = out.spinner("Fetching contacts...");
 
       try {
+        if (hasApiKey()) {
+          const res = await restRequest<{ contacts: any[]; total: number }>("/api/v1/contacts", {
+            query: {
+              limit: parseInt(opts.limit) || 50,
+            },
+          });
+
+          // In-memory filter for status, genre, bbc
+          let contacts = res.contacts;
+          if (opts.status) {
+            contacts = contacts.filter(c => c.pipeline_status === opts.status);
+          }
+          if (opts.genre) {
+            contacts = contacts.filter(c => c.genres?.includes(opts.genre));
+          }
+          if (opts.bbc) {
+            contacts = contacts.filter(c => c.bbc_station != null);
+          }
+
+          spinner.stop();
+
+          if (opts.json) {
+            out.json(contacts);
+            return;
+          }
+
+          if (contacts.length === 0) {
+            out.info("No contacts found");
+            return;
+          }
+
+          out.table(
+            ["Name", "Email", "Outlet", "Warmth", "Confidence"],
+            contacts.map((c) => [
+              out.truncate(c.name, 22),
+              out.truncate(c.email, 28),
+              out.truncate(c.outlet, 18) || "\u2014",
+              out.warmthBadge(null),
+              out.confidenceBadge(c.enrichment_confidence),
+            ]),
+          );
+
+          out.info(`${contacts.length} results`);
+          navHint(["tap contacts show <id>"]);
+          blank();
+          return;
+        }
+
         const supabase = getClient();
         const wsId = await resolveWorkspaceId(supabase, opts.workspace);
 
@@ -738,6 +851,43 @@ Examples:
       const spinner = out.spinner("Searching...");
 
       try {
+        if (hasApiKey()) {
+          const res = await restRequest<{ contacts: any[]; total: number }>("/api/v1/contacts", {
+            query: {
+              search: query,
+              limit: 20,
+            },
+          });
+
+          spinner.stop();
+
+          if (opts.json) {
+            out.json(res.contacts);
+            return;
+          }
+
+          if (res.contacts.length === 0) {
+            out.info(`No contacts matching "${query}"`);
+            return;
+          }
+
+          out.table(
+            ["Name", "Email", "Outlet", "Warmth", "Confidence"],
+            res.contacts.map((c) => [
+              out.truncate(c.name, 22),
+              out.truncate(c.email, 28),
+              out.truncate(c.outlet, 18) || "\u2014",
+              out.warmthBadge(null),
+              out.confidenceBadge(c.enrichment_confidence),
+            ]),
+          );
+
+          out.info(`${res.contacts.length} results`);
+          navHint(["tap contacts show <id>"]);
+          blank();
+          return;
+        }
+
         const supabase = getClient();
         const wsId = await resolveWorkspaceId(supabase, opts.workspace);
         const q = escapePostgrestSearch(query);
@@ -838,6 +988,58 @@ Examples:
       const spinner = out.spinner("Adding contact...");
 
       try {
+        if (hasApiKey()) {
+          const res = await restRequest<{
+            imported: number;
+            results: Array<{ email: string; status: string; reason?: string }>;
+          }>('/api/v1/contacts', {
+            method: 'POST',
+            body: {
+              contacts: [
+                {
+                  name: opts.name,
+                  email: opts.email.toLowerCase().trim(),
+                  outlet: opts.outlet,
+                  role: opts.role,
+                  platform_type: opts.platform,
+                  genres: opts.genre ? opts.genre.split(",").map((g: string) => g.trim()) : undefined,
+                  bbc_station: opts.bbcStation,
+                },
+              ],
+            },
+          });
+
+          if (res.imported === 0) {
+            spinner.stop();
+            const reason = res.results?.[0]?.reason || 'unknown';
+            out.error(`Failed to create contact: ${reason}`);
+            process.exit(1);
+          }
+
+          // Search to retrieve the generated ID
+          const searchRes = await restRequest<{ contacts: Array<{ id: string; name: string; email: string }> }>('/api/v1/contacts', {
+            query: { search: opts.email },
+          });
+
+          const created = searchRes.contacts.find(c => c.email.toLowerCase() === opts.email.toLowerCase().trim());
+          spinner.stop();
+
+          if (opts.json) {
+            out.json(created || { name: opts.name, email: opts.email });
+            return;
+          }
+
+          out.success(`Added ${opts.name} <${opts.email}>`);
+          if (created) {
+            out.info(`ID: ${created.id}`);
+            navHint([
+              `tap contacts show ${created.id.slice(0, 8)}`,
+            ]);
+          }
+          blank();
+          return;
+        }
+
         const supabase = getClient();
         const wsId = await resolveWorkspaceId(supabase, opts.workspace);
 
@@ -902,6 +1104,12 @@ Examples:
       const spinner = out.spinner("Queueing enrichment...");
 
       try {
+        if (hasApiKey()) {
+          spinner.stop();
+          out.error("Contact enrichment queueing is not supported in REST mode.");
+          process.exit(1);
+        }
+
         const supabase = getClient();
 
         const { error } = await supabase

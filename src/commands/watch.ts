@@ -9,10 +9,9 @@
  *   tap watch <campaign-id>  -- campaign focus
  *   tap watch --no-clear     -- log mode (append instead of redraw)
  */
-
 import { Command } from "commander";
 import chalk from "chalk";
-import { getClient, resolveWorkspaceId } from "../auth.js";
+import { getClient, resolveWorkspaceId, hasApiKey } from "../auth.js";
 import * as out from "../output.js";
 import { GLYPH, COLOUR } from "../ui/theme.js";
 import { relativeDate, campaignLabel } from "../ui/detail.js";
@@ -29,6 +28,11 @@ export function watchCommand(): Command {
       const interval = Math.max(10, parseInt(opts.interval));
 
       try {
+        if (hasApiKey()) {
+          out.error("Watch command is not supported in REST mode. For real-time workspace activity, use legacy configuration mode or check the live dashboard on the TAP web portal.");
+          process.exit(1);
+        }
+
         const supabase = getClient();
         const wsId = await resolveWorkspaceId(supabase, opts.workspace);
 

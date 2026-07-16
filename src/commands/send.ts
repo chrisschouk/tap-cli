@@ -10,7 +10,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import * as prompts from "@clack/prompts";
-import { getClient, resolveWorkspaceId } from "../auth.js";
+import { getClient, resolveWorkspaceId, hasApiKey } from "../auth.js";
 import * as out from "../output.js";
 import { warningBlock, navHint, campaignLabel } from "../ui/detail.js";
 import { createRailSpinner, stepComplete, blank, summaryBar } from "../ui/format.js";
@@ -37,6 +37,11 @@ export function sendCommand(): Command {
       const rail = createRailSpinner("Loading pitch").start();
 
       try {
+        if (hasApiKey()) {
+          rail.fail("Pitch sending is not supported in REST mode. Per PRODUCT_GUARDRAILS.md §1, sending pitches requires human approval inside the TAP workspace UI.");
+          process.exit(1);
+        }
+
         const supabase = getClient();
         const wsId = await resolveWorkspaceId(supabase, opts.workspace);
 
