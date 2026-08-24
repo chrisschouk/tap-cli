@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 560" font-family="'JetBrains Mono','SF Mono','Fira Code','Cascadia Code',monospace">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="0%" r="90%">
+      <stop offset="0%" stop-color="#2a2440"/>
+      <stop offset="100%" stop-color="#0d0b16"/>
+    </radialGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#7c3350"/>
+      <stop offset="60%" stop-color="#cd5c5c"/>
+      <stop offset="100%" stop-color="#e8a04a"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Window -->
+  <rect x="10" y="10" width="800" height="540" rx="14" fill="#0d0b16"/>
+  <rect x="10" y="10" width="800" height="540" rx="14" fill="url(#glow)"/>
+  <rect x="10" y="10" width="800" height="44" rx="14" fill="#151221"/>
+  <rect x="10" y="32" width="800" height="22" fill="#151221"/>
+
+  <!-- Chrome dots -->
+  <circle cx="34" cy="32" r="6" fill="#ff5f57"/>
+  <circle cx="52" cy="32" r="6" fill="#febc2e"/>
+  <circle cx="70" cy="32" r="6" fill="#28c840"/>
+  <text x="410" y="36" text-anchor="middle" font-size="12" fill="#5b546d">tap — 96×32</text>
+
+  <!-- Accent bar -->
+  <rect x="10" y="54" width="800" height="2" fill="url(#bar)" opacity="0.6"/>
+
+  <!-- ROW 1: install -->
+  <text x="30" y="86" font-size="13" fill="#e05252" font-weight="bold">$</text>
+  <text x="46" y="86" font-size="13" fill="#e8e6ee">npm i -g @totalaudiopromo/tap-cli</text>
+  <text x="30" y="106" font-size="11" fill="#7b7485">added 32 packages in 4s</text>
+
+  <!-- ROW 2: auth -->
+  <text x="30" y="136" font-size="13" fill="#e05252" font-weight="bold">$</text>
+  <text x="46" y="136" font-size="13" fill="#e8e6ee">tap auth login</text>
+  <text x="30" y="158" font-size="12" fill="#e8a04a">  Key</text>
+  <text x="118" y="158" font-size="12" fill="#7b7485">tap_ak_live_••••••••••••••••</text>
+  <text x="30" y="178" font-size="12" fill="#28c840">✓</text>
+  <text x="42" y="178" font-size="12" fill="#e8e6ee"> Authenticated as share-artist-17</text>
+  <text x="30" y="196" font-size="11" fill="#7b7485">  scopes: campaigns:read contacts:read pitches:write outcomes:write</text>
+
+  <!-- ROW 3: campaigns -->
+  <text x="30" y="228" font-size="13" fill="#e05252" font-weight="bold">$</text>
+  <text x="46" y="228" font-size="13" fill="#e8e6ee">tap campaigns list --status active</text>
+  <text x="30" y="252" font-size="12" fill="#7b7485">┌───────────────────┬──────────────┬─────────────┬──────────────┐</text>
+  <text x="30" y="268" font-size="12" fill="#e8a04a" font-weight="bold">│ Name</text>
+  <text x="120" y="268" font-size="12" fill="#e8a04a" font-weight="bold">Release</text>
+  <text x="230" y="268" font-size="12" fill="#e8a04a" font-weight="bold">Status</text>
+  <text x="330" y="268" font-size="12" fill="#e8a04a" font-weight="bold">Pitches│</text>
+  <text x="30" y="284" font-size="12" fill="#7b7485">├───────────────────┼──────────────┼─────────────┼──────────────┤</text>
+  <text x="30" y="300" font-size="12" fill="#e8e6ee">│ Spring EP Push     </text>
+  <text x="120" y="300" font-size="12" fill="#e8e6ee">Golden Hour </text>
+  <text x="230" y="300" font-size="12" fill="#28c840">active</text>
+  <text x="330" y="300" font-size="12" fill="#e8e6ee">41</text>
+  <text x="350" y="300" font-size="12" fill="#7b7485">        │</text>
+  <text x="30" y="316" font-size="12" fill="#e8e6ee">│ LP Campaign        </text>
+  <text x="120" y="316" font-size="12" fill="#e8e6ee">Night Drive</text>
+  <text x="230" y="316" font-size="12" fill="#28c840">active</text>
+  <text x="330" y="316" font-size="12" fill="#e8e6ee">22</text>
+  <text x="350" y="316" font-size="12" fill="#7b7485">        │</text>
+  <text x="30" y="332" font-size="12" fill="#e8e6ee">│ Radio Focus Week   </text>
+  <text x="120" y="332" font-size="12" fill="#e8e6ee">Skip Track</text>
+  <text x="230" y="332" font-size="12" fill="#e8a04a">draft</text>
+  <text x="330" y="332" font-size="12" fill="#7b7485">—</text>
+  <text x="350" y="332" font-size="12" fill="#7b7485">        │</text>
+  <text x="30" y="348" font-size="12" fill="#7b7485">└───────────────────┴──────────────┴─────────────┴──────────────┘</text>
+
+  <!-- ROW 4: stats -->
+  <text x="30" y="382" font-size="13" fill="#e05252" font-weight="bold">$</text>
+  <text x="46" y="382" font-size="13" fill="#e8e6ee">tap stats</text>
+  <text x="30" y="404" font-size="12" fill="#e8a04a">  Campaigns</text>
+  <text x="150" y="404" font-size="12" fill="#e8e6ee">7 active</text>
+  <text x="30" y="422" font-size="12" fill="#e8a04a">  Contacts</text>
+  <text x="150" y="422" font-size="12" fill="#e8e6ee">214 warm</text>
+  <text x="30" y="440" font-size="12" fill="#e8a04a">  Pitches drafted</text>
+  <text x="150" y="440" font-size="12" fill="#e8e6ee">63  </text>
+  <text x="30" y="458" font-size="12" fill="#e8a04a">  Approval queue</text>
+  <text x="150" y="458" font-size="12" fill="#e8e6ee">4 awaiting you</text>
+
+  <!-- Cursor -->
+  <text x="30" y="492" font-size="13" fill="#e05252" font-weight="bold">$</text>
+  <rect x="46" y="476" width="8" height="18" fill="#e05252" opacity="0.7">
+    <animate attributeName="opacity" values="0.7;0;0.7" dur="1.1s" repeatCount="indefinite"/>
+  </rect>
+</svg>
