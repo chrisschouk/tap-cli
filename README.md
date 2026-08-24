@@ -31,7 +31,7 @@
 <br>
 
 <p align="center">
-  <img src="assets/tap-cli-screenshot.svg" alt="tap-cli demo" width="90%">
+  <img src="assets/tap-cli-demo.gif" alt="tap-cli demo" width="90%">
 </p>
 
 <br>
