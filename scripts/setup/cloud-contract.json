@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "path": ".",
+      "manager": "pnpm@10.0.0"
+    }
+  ],
+  "environment": []
+}
