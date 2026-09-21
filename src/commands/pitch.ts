@@ -11,7 +11,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import * as prompts from "@clack/prompts";
-import { getClient, resolveWorkspaceId, getAnthropicKey, hasApiKey } from "../auth.js";
+import { getClient, resolveWorkspaceId, getOpenRouterKey, hasApiKey } from "../auth.js";
 import { restRequest } from "../lib/rest.js";
 import * as out from "../output.js";
 import { GLYPH, COLOUR } from "../ui/theme.js";
@@ -277,11 +277,11 @@ export function pitchCommand(): Command {
           process.exit(1);
         }
 
-        // Check for Anthropic key
-        const apiKey = getAnthropicKey();
+        // Pitch drafts go through OpenRouter
+        const apiKey = getOpenRouterKey();
         if (!apiKey) {
           out.error(
-            "ANTHROPIC_API_KEY not set. Add it to ~/.tap/config.json or set the environment variable.",
+            "OPENROUTER_API_KEY not set. Add openrouterKey to ~/.tap/config.json or set the environment variable.",
           );
           process.exit(1);
         }

@@ -1,13 +1,14 @@
 /**
  * AI Pitch Generator
  *
- * Generates personalised pitch drafts using Claude Sonnet.
+ * Generates personalised pitch drafts through OpenRouter, on the approved
+ * model pair: deepseek/deepseek-v4.1-flash first, ~z-ai/glm-flash-latest if
+ * deepseek fails. Direct Anthropic calls are not allowed.
  *
  * Adapted from apps/tap/lib/pitch-drafts/ai-generator.ts in the TAP monorepo.
  * Self-contained -- no monorepo imports.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
 
 // ============================================
 // TYPES
@@ -79,7 +80,17 @@ export interface PitchGenerateResult {
 // CONSTANTS
 // ============================================
 
-const MODEL = "claude-sonnet-4-5-20250514";
+const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+
+/**
+ * Tried in order, one request per model. Not sent as OpenRouter's `models`
+ * array, because that array fails the whole request with a 400 when any slug
+ * in it has been retired.
+ */
+export const MODEL_CHAIN = [
+  "deepseek/deepseek-v4.1-flash",
+  "~z-ai/glm-flash-latest",
+] as const;
 const MAX_TIMEOUT = 30_000; // CLI can afford slightly longer timeout
 const MAX_RETRIES = 2;
 
@@ -327,47 +338,83 @@ export function parseResponse(text: string): PitchGenerateResult {
 // GENERATOR
 // ============================================
 
+/** An HTTP failure worth retrying on the same model: rate limit or server error. */
+class RetryableError extends Error {}
+
+interface ChatCompletion {
+  choices?: Array<{ message?: { content?: string | null } }>;
+  error?: { message?: string };
+}
+
+async function completeOnce(
+  model: string,
+  input: PitchGenerateInput,
+  apiKey: string,
+  fetchImpl: typeof fetch,
+): Promise<string> {
+  const res = await fetchImpl(OPENROUTER_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "X-Title": "tap-cli",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 1024,
+      temperature: 0.8,
+      messages: [
+        { role: "system", content: buildSystemPrompt(input) },
+        { role: "user", content: buildUserPrompt(input) },
+      ],
+    }),
+    signal: AbortSignal.timeout(MAX_TIMEOUT),
+  });
+
+  const body = (await res.json().catch(() => ({}))) as ChatCompletion;
+  if (!res.ok) {
+    const message = `${model}: HTTP ${res.status} ${body.error?.message ?? ""}`.trim();
+    if (res.status === 429 || res.status >= 500) throw new RetryableError(message);
+    throw new Error(message);
+  }
+
+  const text = body.choices?.[0]?.message?.content?.trim();
+  if (!text) throw new Error(`${model}: no text response from AI`);
+  return text;
+}
+
+/** Retry one model on rate limits and server errors, with exponential backoff. */
+async function completeWithRetries(
+  model: string,
+  input: PitchGenerateInput,
+  apiKey: string,
+  fetchImpl: typeof fetch,
+): Promise<string> {
+  let lastError: Error = new Error(`${model}: no attempt made`);
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await completeOnce(model, input, apiKey, fetchImpl);
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (!(err instanceof RetryableError) || attempt === MAX_RETRIES) break;
+      await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+    }
+  }
+  throw lastError;
+}
+
 export async function generateAIPitch(
   input: PitchGenerateInput,
   apiKey: string,
+  fetchImpl: typeof fetch = fetch,
 ): Promise<PitchGenerateResult> {
-  const client = new Anthropic({ apiKey, timeout: MAX_TIMEOUT });
-  let lastError: Error | null = null;
-
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+  const errors: string[] = [];
+  for (const model of MODEL_CHAIN) {
     try {
-      const response = await client.messages.create({
-        model: MODEL,
-        max_tokens: 1024,
-        temperature: 0.8,
-        system: buildSystemPrompt(input),
-        messages: [{ role: "user", content: buildUserPrompt(input) }],
-      });
-
-      const textBlock = response.content.find(
-        (block): block is Anthropic.Messages.TextBlock => block.type === "text",
-      );
-
-      if (!textBlock) {
-        throw new Error("No text response from AI");
-      }
-
-      return parseResponse(textBlock.text);
+      return parseResponse(await completeWithRetries(model, input, apiKey, fetchImpl));
     } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-
-      if (
-        err instanceof Anthropic.RateLimitError ||
-        err instanceof Anthropic.InternalServerError
-      ) {
-        const delay = Math.pow(2, attempt) * 1000;
-        await new Promise((resolve) => setTimeout(resolve, delay));
-        continue;
-      }
-
-      break;
+      errors.push(err instanceof Error ? err.message : String(err));
     }
   }
-
-  throw lastError || new Error("Pitch generation failed after retries");
+  throw new Error(`Pitch generation failed on every model: ${errors.join(" | ")}`);
 }
