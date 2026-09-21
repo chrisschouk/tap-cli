@@ -42,7 +42,7 @@ export interface TapConfig {
 
   // Shared
   workspaceId?: string;
-  anthropicKey?: string;
+  openrouterKey?: string;
   perplexityKey?: string;
 }
 
@@ -70,7 +70,7 @@ export function loadConfig(): TapConfig | null {
     process.env.SUPABASE_SERVICE_ROLE_KEY;
   const envTapUrl = process.env.TAP_URL;
   const envWorkspace = process.env.TAP_WORKSPACE_ID;
-  const envAnthropic = process.env.ANTHROPIC_API_KEY;
+  const envOpenRouter = process.env.OPENROUTER_API_KEY;
 
   const hasEnvAuth = envApiKey || (envUrl && envKey);
 
@@ -85,7 +85,7 @@ export function loadConfig(): TapConfig | null {
     supabaseUrl: envUrl ?? fromFile?.supabaseUrl,
     supabaseKey: envKey ?? fromFile?.supabaseKey,
     workspaceId: envWorkspace ?? fromFile?.workspaceId,
-    anthropicKey: envAnthropic ?? fromFile?.anthropicKey,
+    openrouterKey: envOpenRouter ?? fromFile?.openrouterKey,
     perplexityKey: fromFile?.perplexityKey,
   };
   return _cachedConfig;
@@ -152,11 +152,11 @@ export function getWorkspaceId(): string | undefined {
   return config?.workspaceId || process.env.TAP_WORKSPACE_ID;
 }
 
-export function getAnthropicKey(): string | undefined {
+export function getOpenRouterKey(): string | undefined {
   // Env var takes priority
-  if (process.env.ANTHROPIC_API_KEY) return process.env.ANTHROPIC_API_KEY;
+  if (process.env.OPENROUTER_API_KEY) return process.env.OPENROUTER_API_KEY;
   const config = loadConfig();
-  return config?.anthropicKey;
+  return config?.openrouterKey;
 }
 
 export async function resolveWorkspaceId(

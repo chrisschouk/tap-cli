@@ -221,7 +221,7 @@ tap contacts enrich <id>                      # queue contact for AI enrichment
 
 ### `tap pitch` — generate AI pitch drafts
 
-Generates three pitch variants (Direct, Story, Value) tailored to the contact's enrichment data, relationship history, and your campaign brief. Requires `ANTHROPIC_API_KEY`.
+Generates three pitch variants (Direct, Story, Value) tailored to the contact's enrichment data, relationship history, and your campaign brief. Requires `OPENROUTER_API_KEY`. Drafts come from `deepseek/deepseek-v4.1-flash`, with `~z-ai/glm-flash-latest` as the fallback.
 
 ```bash
 tap pitch <campaign-id>                                  # interactive contact selection
@@ -440,7 +440,7 @@ Environment variables override config file values:
 | `TAP_API_KEY` | Your scoped API key (overrides config) |
 | `TAP_API_URL` | API base URL (default: `https://totalaudiopromo.com/api/v1`) |
 | `TAP_WORKSPACE_ID` | Default workspace ID |
-| `ANTHROPIC_API_KEY` | Required for `tap pitch` |
+| `OPENROUTER_API_KEY` | Required for `tap pitch` |
 | `PERPLEXITY_API_KEY` | Required for `tap discover` |
 
 ---
@@ -450,7 +450,7 @@ Environment variables override config file values:
 - **Node.js 20** or later
 - A **TAP account** with a release pack (get one at [totalaudiopromo.com](https://totalaudiopromo.com))
 - A **scoped API key** from Settings → API Keys inside your workspace
-- `ANTHROPIC_API_KEY` for AI pitch generation (`tap pitch`)
+- `OPENROUTER_API_KEY` for AI pitch generation (`tap pitch`)
 - `PERPLEXITY_API_KEY` for contact discovery (`tap discover`)
 - **Gmail connected** in TAP settings for sending (`tap send`)
 
