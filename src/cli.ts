@@ -32,7 +32,7 @@ import { watchCommand } from "./commands/watch.js";
 import { skillCommand } from "./commands/skill.js";
 import { intro } from "./ui/format.js";
 
-export const VERSION = "0.3.0";
+export const VERSION = "0.4.0";
 
 // Restore cursor visibility if user hits Ctrl+C during a spinner
 process.on("SIGINT", () => {

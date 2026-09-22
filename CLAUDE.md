@@ -2,7 +2,7 @@
 
 Terminal interface for the Total Audio Platform. Manage campaigns, contacts, pitches, outcomes,
 and workspace skills from the command line. Published on npm as `@totalaudiopromo/tap-cli`
-(v0.3.1). Part of the agent-native suite that wraps TAP (`totalaudiopromo.com`) for CLI and
+(v0.4.0). Part of the agent-native suite that wraps TAP (`totalaudiopromo.com`) for CLI and
 agent consumers. Auth routes through the TAP REST v1 API using workspace-scoped `tap_ak_*` keys.
 
 ## Stack
