@@ -8,22 +8,18 @@
  */
 
 import { Command } from "commander";
-import { exec } from "node:child_process";
-import { platform } from "node:os";
 import { getClient, hasApiKey } from "../auth.js";
 import { restRequest } from "../lib/rest.js";
+import { openUrl } from "../lib/browser.js";
 import * as out from "../output.js";
 import { handleError } from "../ui/errors.js";
 
 const TAP_BASE = "https://tap.totalaudiopromo.com";
 
-function openUrl(url: string): void {
-  const cmd = platform() === "darwin" ? "open" : "xdg-open";
-  exec(`${cmd} "${url}"`, (err) => {
-    if (err) {
-      out.error(`Failed to open browser: ${err.message}`);
-      out.info(`URL: ${url}`);
-    }
+function openInBrowser(url: string): void {
+  openUrl(url, (message) => {
+    out.error(`Failed to open browser: ${message}`);
+    out.info(`URL: ${url}`);
   });
 }
 
@@ -40,7 +36,7 @@ export function openCommand(): Command {
           console.log(url);
         } else {
           out.success(`Opening TAP`);
-          openUrl(url);
+          openInBrowser(url);
         }
         return;
       }
@@ -87,7 +83,7 @@ export function openCommand(): Command {
               console.log(resolvedUrl);
             } else {
               out.success(`Opening TAP item ${fullId.slice(0, 8)}...`);
-              openUrl(resolvedUrl);
+              openInBrowser(resolvedUrl);
             }
             return;
           }
@@ -113,7 +109,7 @@ export function openCommand(): Command {
             console.log(url);
           } else {
             out.success(`Opening contact ${fullId.slice(0, 8)}...`);
-            openUrl(url);
+            openInBrowser(url);
           }
           return;
         }
@@ -133,7 +129,7 @@ export function openCommand(): Command {
             console.log(url);
           } else {
             out.success(`Opening campaign ${fullId.slice(0, 8)}...`);
-            openUrl(url);
+            openInBrowser(url);
           }
           return;
         }

@@ -109,3 +109,51 @@ export async function restRequest<T = unknown>(
 
   return (json as T) ?? ({} as T);
 }
+
+export type ApiKeyCheckResult =
+  | { ok: true; scoped: boolean }
+  | { ok: false; reason: "invalid-key" | "network" | "unknown"; message: string };
+
+/**
+ * Cheap, read-only call used to verify a pasted key actually
+ * authenticates before it's written to disk. Hits the campaigns list
+ * with limit=1 — the lightest read endpoint that requires a valid key.
+ *
+ * A 401 means the key itself is bad. A 403 means the key is valid but
+ * lacks `campaigns:read` — still worth saving, so that's reported as
+ * `ok: true, scoped: false`.
+ */
+export async function verifyApiKey(
+  apiKey: string,
+  baseUrl?: string,
+): Promise<ApiKeyCheckResult> {
+  const url = new URL("/api/v1/campaigns", baseUrl || DEFAULT_BASE_URL);
+  url.searchParams.set("limit", "1");
+
+  try {
+    const res = await fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "User-Agent": "@totalaudiopromo/tap-cli",
+      },
+    });
+    if (res.status === 401) {
+      return { ok: false, reason: "invalid-key", message: "Invalid or missing API key" };
+    }
+    if (res.status === 403) {
+      return { ok: true, scoped: false };
+    }
+    if (!res.ok) {
+      return {
+        ok: false,
+        reason: "unknown",
+        message: `TAP returned ${res.status} ${res.statusText}`,
+      };
+    }
+    return { ok: true, scoped: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, reason: "network", message };
+  }
+}

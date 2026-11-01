@@ -13,9 +13,13 @@
 import { Command } from "commander";
 import * as clack from "@clack/prompts";
 import { saveConfig, loadConfig, hasApiKey } from "../auth.js";
+import { verifyApiKey } from "../lib/rest.js";
+import { checkApiKeyFormat } from "../lib/key-validation.js";
+import { openUrl } from "../lib/browser.js";
 import * as out from "../output.js";
 
 const REST_DEPRECATION_DATE = "14 June 2026";
+const API_KEYS_URL = "https://totalaudiopromo.com/settings/api-keys";
 
 export function authCommand(): Command {
   const cmd = new Command("auth").description("Manage authentication");
@@ -75,7 +79,7 @@ async function runRestLogin(): Promise<void> {
   clack.note(
     [
       "1. Sign in to https://totalaudiopromo.com",
-      "2. Go to Settings → API Keys (Agency tier)",
+      "2. Go to Settings → API Keys",
       "3. Mint a key — choose the scopes you need:",
       "   campaigns:read campaigns:write pitches:read pitches:write",
       "   outcomes:read outcomes:write skills:read skills:write",
@@ -85,14 +89,24 @@ async function runRestLogin(): Promise<void> {
     "Where to find your API key",
   );
 
+  const shouldOpen = await clack.confirm({
+    message: `Open ${API_KEYS_URL} in your browser now?`,
+    initialValue: true,
+  });
+  if (clack.isCancel(shouldOpen)) {
+    clack.cancel("Cancelled");
+    process.exit(0);
+  }
+  if (shouldOpen) {
+    openUrl(API_KEYS_URL, (message) => {
+      clack.log.warn(`Could not open browser automatically: ${message}`);
+      clack.log.info(`Visit ${API_KEYS_URL} manually.`);
+    });
+  }
+
   const apiKey = await clack.password({
     message: "Paste your tap_ak_ API key",
-    validate: (v) => {
-      if (!v) return "Required";
-      if (!v.startsWith("tap_ak_")) return "Must start with tap_ak_";
-      if (v.length < 40) return "Looks too short";
-      return undefined;
-    },
+    validate: (v) => checkApiKeyFormat(v).reason,
   });
   if (clack.isCancel(apiKey)) {
     clack.cancel("Cancelled");
@@ -117,17 +131,45 @@ async function runRestLogin(): Promise<void> {
     process.exit(0);
   }
 
+  const resolvedUrl = (tapUrl as string) || undefined;
+  const spin = clack.spinner();
+  spin.start("Verifying key against TAP");
+  const result = await verifyApiKey(apiKey as string, resolvedUrl);
+  if (!result.ok) {
+    spin.stop("Verification failed");
+    reportVerifyFailure(result);
+    process.exit(1);
+  }
+  spin.stop(
+    result.scoped
+      ? "Key verified"
+      : "Key verified (no campaigns:read scope — some commands will need a broader key)",
+  );
+
   const existing = loadConfig() ?? {};
   saveConfig({
     ...existing,
     apiKey: apiKey as string,
-    tapUrl: (tapUrl as string) || undefined,
+    tapUrl: resolvedUrl,
     workspaceId: (workspaceId as string) || existing.workspaceId,
   });
 
   clack.outro(
-    "Credentials saved to ~/.tap/config.json. Try `tap skill list` to confirm.",
+    "Credentials saved to ~/.tap/config.json. Try `tap skill list` to confirm, then `tap mcp setup` to wire up an MCP client.",
   );
+}
+
+function reportVerifyFailure(
+  result: Extract<Awaited<ReturnType<typeof verifyApiKey>>, { ok: false }>,
+): void {
+  if (result.reason === "invalid-key") {
+    clack.log.error("TAP rejected that key (401) — check you copied it in full.");
+  } else if (result.reason === "network") {
+    clack.log.error(`Could not reach TAP: ${result.message}`);
+    clack.log.info("Check your connection or --legacy if TAP REST is down.");
+  } else {
+    clack.log.error(result.message);
+  }
 }
 
 async function runLegacyLogin(): Promise<void> {
