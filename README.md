@@ -84,10 +84,24 @@ The binary is `tap`. Run `tap --version` to confirm it installed.
 
 ## Quick start
 
-```bash
-# Authenticate with your API key
-tap auth login
+1. **Create a key** — sign in to [totalaudiopromo.com](https://totalaudiopromo.com), go to
+   Settings → API Keys, and mint a scoped key (`tap_ak_...`).
+2. **Log in** — `tap auth login` offers to open the API keys page, then verifies the key
+   against TAP before saving it:
 
+   ```bash
+   npx @totalaudiopromo/tap-cli auth login
+   ```
+
+3. **Connect your agent** — wire the same key into Claude Code, Claude Desktop, or Cursor:
+
+   ```bash
+   tap mcp setup
+   ```
+
+From there:
+
+```bash
 # Open interactive mode
 tap
 
@@ -95,6 +109,9 @@ tap
 tap campaigns list --status active
 tap stats
 tap queue
+
+# Check your setup any time
+tap doctor
 ```
 
 Interactive mode presents a menu-driven interface for all commands — useful when you don't know a specific ID or want to browse before acting.
@@ -130,7 +147,47 @@ tap auth login              # default flow — asks for a tap_ak_* key
 tap auth status             # show current auth mode + scopes
 ```
 
+`tap auth login` offers to open the Settings → API Keys page in your browser, then verifies
+the pasted key against TAP with a cheap read call before saving — a bad format, a 401, or a
+network failure all get a clear message instead of a silently broken config.
+
 Credentials are stored at `~/.tap/config.json` (chmod 600). The CLI proxies every call through the TAP REST API — no Supabase credentials touch your machine.
+
+---
+
+### `tap mcp setup` / `tap connect` — wire up an MCP client
+
+Prints (or, with `--write`, writes) MCP server config for Claude Code, Claude Desktop, and
+Cursor using the key already stored by `tap auth login`. The full key is never printed to
+stdout — only inside a config file you've confirmed writing.
+
+```bash
+tap mcp setup                            # print config for all three targets
+tap mcp setup --target claude-code       # just the claude mcp add command
+tap mcp setup --target claude-desktop --write   # merge into claude_desktop_config.json
+tap connect                              # shorthand for `tap mcp setup`
+```
+
+Claude Desktop and Cursor configs are merged, not overwritten — other registered servers are
+left in place, and an existing file is backed up to `<path>.bak-<timestamp>` before any write.
+For Claude Code, pass `--write` to have `tap` run `claude mcp add` for you (only if `claude` is
+on PATH and you confirm), or use the printed remote alternative:
+
+```bash
+claude mcp add --transport http tap https://totalaudiopromo.com/api/mcp
+```
+
+---
+
+### `tap doctor` — check your setup
+
+```bash
+tap doctor
+tap doctor --json
+```
+
+Green/red checklist: Node version, a stored API key, whether TAP accepts that key, and
+whether `@totalaudiopromo/tap-mcp` resolves on npm. Exits non-zero if anything's red.
 
 ---
 

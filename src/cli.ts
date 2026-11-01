@@ -30,9 +30,11 @@ import { discoverCommand } from "./commands/discover.js";
 import { importCommand } from "./commands/import.js";
 import { watchCommand } from "./commands/watch.js";
 import { skillCommand } from "./commands/skill.js";
+import { mcpCommand, connectCommand } from "./commands/mcp.js";
+import { doctorCommand } from "./commands/doctor.js";
 import { intro } from "./ui/format.js";
 
-export const VERSION = "0.4.0";
+export const VERSION = "0.5.0";
 
 // Restore cursor visibility if user hits Ctrl+C during a spinner
 process.on("SIGINT", () => {
@@ -56,9 +58,12 @@ export function buildProgram(): Command {
 
   program.addCommand(authCommand());
   program.addCommand(campaignsCommand());
+  program.addCommand(connectCommand());
   program.addCommand(contactsCommand());
   program.addCommand(discoverCommand());
+  program.addCommand(doctorCommand());
   program.addCommand(importCommand());
+  program.addCommand(mcpCommand());
   program.addCommand(outcomeCommand());
   program.addCommand(pitchCommand());
   program.addCommand(openCommand());
