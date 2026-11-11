@@ -8,7 +8,7 @@
  */
 
 import { Command } from "commander";
-import { restRequest } from "../lib/rest.js";
+import { restRequest, TapApiError } from "../lib/rest.js";
 import { openUrl } from "../lib/browser.js";
 import { dashboard } from "../lib/dashboard.js";
 import * as out from "../output.js";
@@ -19,6 +19,25 @@ function openInBrowser(url: string): void {
     out.error(`Failed to open browser: ${message}`);
     out.info(`URL: ${url}`);
   });
+}
+
+/** A record's dashboard URL if it exists. Only a 404 means "try the other type". */
+async function urlIfFound(path: string, url: string): Promise<string | null> {
+  try {
+    await restRequest(path);
+    return url;
+  } catch (err) {
+    if (err instanceof TapApiError && err.status === 404) return null;
+    throw err;
+  }
+}
+
+async function urlForFullId(id: string): Promise<string | null> {
+  const encoded = encodeURIComponent(id);
+  return (
+    (await urlIfFound(`/api/v1/contacts/${encoded}`, dashboard.contact(id))) ??
+    (await urlIfFound(`/api/v1/campaigns/${encoded}`, dashboard.release(id)))
+  );
 }
 
 export function openCommand(): Command {
@@ -63,18 +82,7 @@ export function openCommand(): Command {
             }
           }
         } else {
-          // Full UUID, try querying contact detail
-          try {
-            await restRequest(`/api/v1/contacts/${encodeURIComponent(id)}`);
-            resolvedUrl = dashboard.contact(id);
-          } catch {
-            try {
-              await restRequest(`/api/v1/campaigns/${encodeURIComponent(id)}`);
-              resolvedUrl = dashboard.release(id);
-            } catch {
-              resolvedUrl = null;
-            }
-          }
+          resolvedUrl = await urlForFullId(id);
         }
 
         if (resolvedUrl) {

@@ -10,7 +10,7 @@ export const dashboard = {
   releases: () => `${getTapUrl()}/releases`,
   release: (id: string) => `${getTapUrl()}/releases/${encodeURIComponent(id)}`,
   approveAndSend: (campaignId: string) =>
-    `${getTapUrl()}/releases/${encodeURIComponent(campaignId)}?tab=pitching#waiting-on-you`,
+    `${getTapUrl()}/releases/${encodeURIComponent(campaignId)}?tab=pitching`,
   contacts: () => `${getTapUrl()}/contacts`,
   contact: (id: string) => `${getTapUrl()}/contacts/${encodeURIComponent(id)}`,
 };

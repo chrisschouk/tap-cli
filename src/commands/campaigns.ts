@@ -13,9 +13,8 @@ import { blank } from "../ui/format.js";
 
 /**
  * Show full campaign detail view with health metrics and coverage.
- * Exported so interactive mode can call it directly.
  */
-export async function showCampaign(
+async function showCampaign(
   id: string,
   opts: { json?: boolean },
 ): Promise<void> {
@@ -55,22 +54,17 @@ export async function showCampaign(
     console.log(
       `  ${chalk.bold(campaign.name)}  ${out.statusBadge(campaign.status)}`,
     );
-    if (campaign.artist_name) {
-      console.log(`  ${chalk.dim("Artist")}  ${campaign.artist_name}`);
-    }
-    if (campaign.release_title) {
-      console.log(`  ${chalk.dim("Release")} ${campaign.release_title}`);
-    }
-    if (campaign.release_date) {
-      const d = new Date(campaign.release_date).toLocaleDateString("en-GB", {
-        day: "numeric",
-        month: "long",
-        year: "numeric",
-      });
-      console.log(`  ${chalk.dim("Date")}    ${d}`);
-    }
-    if (campaign.goal) {
-      console.log(`  ${chalk.dim("Goal")}    ${campaign.goal}`);
+    const releaseDate = campaign.release_date
+      ? new Date(campaign.release_date).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })
+      : null;
+    const facts: Array<[string, string | null]> = [
+      ["Artist", campaign.artist_name],
+      ["Release", campaign.release_title],
+      ["Date", releaseDate],
+      ["Goal", campaign.goal],
+    ];
+    for (const [label, value] of facts) {
+      if (value) console.log(`  ${chalk.dim(label.padEnd(9))}${value}`);
     }
 
     // -- Contact table --
@@ -88,7 +82,6 @@ export async function showCampaign(
 
     // -- Health --
     const total = contacts.length;
-    console.log("");
     sectionHeader("Health");
     console.log(
       `  ${chalk.dim("Contacts")} ${total}  ${chalk.dim(GLYPH.dot)}  ` +
@@ -112,7 +105,7 @@ export async function showCampaign(
       }
     }
 
-    navHint([`tap open ${id.slice(0, 8)}`]);
+    navHint([`tap send ${campaign.id}`, `tap open ${campaign.id}`]);
     console.log("");
   } catch (err) {
     spinner.stop();
@@ -158,17 +151,17 @@ Examples:
         }
 
         out.table(
-          ["Name", "Artist", "Status", "Release", "Warmth"],
+          ["Name", "Artist", "Status", "Release", "Contacts"],
           res.campaigns.map((c) => [
             out.truncate(c.name, 28),
             out.truncate(c.artist_name, 18) || "—",
             out.statusBadge(c.status),
             c.release_date || "—",
-            "—", // Warmth breakdown not available via REST v1 list campaigns endpoint
+            String(c.contact_count ?? 0),
           ]),
         );
 
-        out.info(`${res.campaigns.length} campaigns`);
+        out.info(`${res.campaigns.length} campaign${res.campaigns.length === 1 ? "" : "s"}`);
         navHint(["tap campaigns show <id>", "tap queue"]);
         blank();
       } catch (err) {
@@ -216,7 +209,7 @@ Examples:
         spinner.stop();
         out.success(`Campaign "${res.campaign.name}" created (${res.campaign.id})`);
         navHint([
-          `tap campaigns show ${res.campaign.id.slice(0, 8)}`,
+          `tap campaigns show ${res.campaign.id}`,
           "tap contacts search \"...\"",
         ]);
         blank();

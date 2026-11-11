@@ -9,12 +9,12 @@ import * as out from "../output.js";
 import { field, fieldList, sectionHeader, relativeDate, navHint, shortDate, ansiPadEnd, campaignLabel } from "../ui/detail.js";
 import { handleError } from "../ui/errors.js";
 import { blank } from "../ui/format.js";
+import { COLOUR, GLYPH } from "../ui/theme.js";
 
 /**
  * Show full contact detail view.
- * Exported so interactive mode can call it directly.
  */
-export async function showContact(
+async function showContact(
   contactId: string,
   opts: { json?: boolean },
 ): Promise<void> {
@@ -72,7 +72,7 @@ export async function showContact(
       }
     }
 
-    navHint([`tap contacts show ${contact.id.slice(0, 8)}`]);
+    navHint([`tap contacts history ${contact.id}`]);
     console.log("");
   } catch (err) {
     spinner.stop();
@@ -156,9 +156,8 @@ function renderTimeline(
 
 /**
  * Show cross-campaign outcome timeline for a contact.
- * Exported so interactive mode can call it directly.
  */
-export async function showHistory(
+async function showHistory(
   contactId: string,
   opts: { limit?: string; json?: boolean },
 ): Promise<void> {
@@ -190,7 +189,7 @@ export async function showHistory(
     }
 
     renderTimeline(contact, events);
-    navHint([`tap contacts show ${contact.id.slice(0, 8)}`]);
+    navHint([`tap contacts show ${contact.id}`]);
     console.log("");
   } catch (err) {
     spinner.stop();
@@ -199,74 +198,82 @@ export async function showHistory(
   }
 }
 
+/** `GET /api/v1/contacts` answers these fields only (apps/tap/app/api/v1/contacts/route.ts). */
+interface ContactListRow {
+  id: string;
+  name: string | null;
+  email: string;
+  outlet: string | null;
+  platform_type: string | null;
+  enriched: boolean | null;
+}
+
+interface ContactPage {
+  contacts: ContactListRow[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+function renderContactPage(res: ContactPage, emptyMessage: string): void {
+  if (res.contacts.length === 0) {
+    out.info(res.total > 0 ? `Page ${res.page} is past the last of ${res.total} contacts` : emptyMessage);
+    return;
+  }
+
+  out.table(
+    ["Name", "Email", "Outlet", "Platform", "Enriched"],
+    res.contacts.map((c) => [
+      out.truncate(c.name, 22),
+      out.truncate(c.email, 30),
+      out.truncate(c.outlet, 20) || "\u2014",
+      c.platform_type || "\u2014",
+      c.enriched ? chalk.hex(COLOUR.success)(GLYPH.check) : chalk.dim(GLYPH.dot),
+    ]),
+  );
+
+  const first = (res.page - 1) * res.limit + 1;
+  const last = first + res.contacts.length - 1;
+  blank();
+  out.info(`${first}\u2013${last} of ${res.total} contacts`);
+  const hints = ["tap contacts show <id-or-email>"];
+  if (last < res.total) hints.push(`--page ${res.page + 1} for more`);
+  navHint(hints);
+  blank();
+}
+
 export function contactsCommand(): Command {
   const cmd = new Command("contacts").description("Manage contacts");
 
   cmd
     .command("list")
-    .description("List contacts")
-    .option("-s, --status <status>", "Pipeline status filter")
-    .option("-g, --genre <genre>", "Genre filter")
-    .option("--bbc", "Only BBC contacts")
-    .option("--warm", "Only warm/hot contacts")
-    .option("--sort <field>", "Sort by: name, warmth, response, last-contacted", "name")
-    .option("-l, --limit <n>", "Max results", "50")
+    .description("List contacts, newest first")
+    .option("--platform <type>", "Only this platform type (radio, press, playlist, podcast, blog)")
+    .option("-l, --limit <n>", "Contacts per page, up to 200", "50")
     .option("-p, --page <number>", "Page number", "1")
     .option("--json", "Output as JSON")
     .addHelpText("after", `
 Examples:
-  tap contacts list --warm --sort warmth
-  tap contacts list --bbc --sort response
-  tap contacts list --genre electronic -l 20
-  tap contacts list --page 2`)
+  tap contacts list --platform radio
+  tap contacts list -l 200 --page 2`)
     .action(async (opts) => {
       const spinner = out.spinner("Fetching contacts...");
 
       try {
-        const res = await restRequest<{ contacts: any[]; total: number }>("/api/v1/contacts", {
+        const res = await restRequest<ContactPage>("/api/v1/contacts", {
           query: {
             limit: parseInt(opts.limit) || 50,
+            page: parseInt(opts.page) || 1,
+            platform_type: opts.platform,
           },
         });
-
-        // In-memory filter for status, genre, bbc
-        let contacts = res.contacts;
-        if (opts.status) {
-          contacts = contacts.filter(c => c.pipeline_status === opts.status);
-        }
-        if (opts.genre) {
-          contacts = contacts.filter(c => c.genres?.includes(opts.genre));
-        }
-        if (opts.bbc) {
-          contacts = contacts.filter(c => c.bbc_station != null);
-        }
-
         spinner.stop();
 
         if (opts.json) {
-          out.json(contacts);
+          out.json(res.contacts);
           return;
         }
-
-        if (contacts.length === 0) {
-          out.info("No contacts found");
-          return;
-        }
-
-        out.table(
-          ["Name", "Email", "Outlet", "Warmth", "Confidence"],
-          contacts.map((c) => [
-            out.truncate(c.name, 22),
-            out.truncate(c.email, 28),
-            out.truncate(c.outlet, 18) || "\u2014",
-            out.warmthBadge(null),
-            out.confidenceBadge(c.enrichment_confidence),
-          ]),
-        );
-
-        out.info(`${contacts.length} results`);
-        navHint(["tap contacts show <id>"]);
-        blank();
+        renderContactPage(res, "No contacts found");
       } catch (err) {
         spinner.stop();
         handleError(err);
@@ -302,7 +309,7 @@ Examples:
       const spinner = out.spinner("Searching...");
 
       try {
-        const res = await restRequest<{ contacts: any[]; total: number }>("/api/v1/contacts", {
+        const res = await restRequest<ContactPage>("/api/v1/contacts", {
           query: {
             search: query,
             limit: 20,
@@ -316,25 +323,7 @@ Examples:
           return;
         }
 
-        if (res.contacts.length === 0) {
-          out.info(`No contacts matching "${query}"`);
-          return;
-        }
-
-        out.table(
-          ["Name", "Email", "Outlet", "Warmth", "Confidence"],
-          res.contacts.map((c) => [
-            out.truncate(c.name, 22),
-            out.truncate(c.email, 28),
-            out.truncate(c.outlet, 18) || "\u2014",
-            out.warmthBadge(null),
-            out.confidenceBadge(c.enrichment_confidence),
-          ]),
-        );
-
-        out.info(`${res.contacts.length} results`);
-        navHint(["tap contacts show <id>"]);
-        blank();
+        renderContactPage(res, `No contacts matching "${query}"`);
       } catch (err) {
         spinner.stop();
         handleError(err);
@@ -357,7 +346,6 @@ Examples:
       "-p, --platform <type>",
       "Platform type (radio, press, playlist, podcast, blog)",
     )
-    .option("-b, --bbc-station <station>", "BBC station name")
     .option("--json", "Output as JSON")
     .action(async (opts) => {
       const spinner = out.spinner("Adding contact...");
@@ -377,7 +365,6 @@ Examples:
                 role: opts.role,
                 platform_type: opts.platform,
                 genres: opts.genre ? opts.genre.split(",").map((g: string) => g.trim()) : undefined,
-                bbc_station: opts.bbcStation,
               },
             ],
           },
@@ -407,7 +394,7 @@ Examples:
         if (created) {
           out.info(`ID: ${created.id}`);
           navHint([
-            `tap contacts show ${created.id.slice(0, 8)}`,
+            `tap contacts show ${created.id}`,
           ]);
         }
         blank();
@@ -428,18 +415,22 @@ Examples:
       try {
         const res = await restRequest<{
           enriched: number;
-          creditsRemaining: number;
+          creditsRemaining: number | null;
           results: Array<{ contactId: string; status: string; error?: string }>;
         }>("/api/v1/contacts/enrich", { method: "POST", body: { contactIds: [id] } });
         spinner.stop();
 
         const result = res.results[0];
         if (result?.status === "enriched") {
-          out.success(`Contact ${id.slice(0, 8)} enriched`);
+          out.success(`Contact ${id} enriched`);
         } else {
-          out.warn(`Contact ${id.slice(0, 8)} ${result?.status ?? "not enriched"}${result?.error ? `: ${result.error}` : ""}`);
+          out.warn(`Contact ${id} ${result?.status ?? "not enriched"}${result?.error ? `: ${result.error}` : ""}`);
         }
-        out.info(`${res.creditsRemaining} enrichments left this month`);
+        out.info(
+          res.creditsRemaining === null
+            ? "Unlimited enrichments on your plan"
+            : `${res.creditsRemaining} enrichments left this month`,
+        );
       } catch (err) {
         spinner.stop();
         handleError(err);

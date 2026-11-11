@@ -8,12 +8,10 @@
 
 import * as prompts from "@clack/prompts";
 import chalk from "chalk";
-import { intro, blank } from "./format.js";
+import { intro, blank, type WorkspaceHints } from "./format.js";
 import { runCommand } from "./run-command.js";
-import { VERSION } from "../cli.js";
+import { VERSION } from "../program.js";
 import { restRequest } from "../lib/rest.js";
-import { showContact, showHistory } from "../commands/contacts.js";
-import { showCampaign } from "../commands/campaigns.js";
 import * as out from "../output.js";
 import {
   contactActionMenu,
@@ -24,11 +22,7 @@ import {
   statusPrompt,
 } from "./actions.js";
 
-interface Hints {
-  campaigns: number;
-  contacts: number;
-  followUps: number;
-}
+type Hints = WorkspaceHints;
 
 interface ContactRow {
   id: string;
@@ -98,7 +92,7 @@ function mainMenuOptions(hints: Hints | null) {
     { value: "outcome", label: "Outcome", hint: "log a campaign outcome" },
     { value: "queue", label: "Queue", hint: queueHint || "today's action queue" },
     { value: "discover", label: "Discover", hint: "find new contacts in TAP" },
-    { value: "import", label: "Import", hint: "import from CSV/JSON" },
+    { value: "import", label: "Import", hint: "from sink, CSV or JSON" },
     { value: "stats", label: "Stats", hint: "workspace statistics in TAP" },
     { value: "watch", label: "Watch", hint: "live campaign updates in TAP" },
     { value: "open", label: "Open TAP", hint: "open in browser" },
@@ -107,7 +101,7 @@ function mainMenuOptions(hints: Hints | null) {
 }
 
 export async function runInteractive(): Promise<void> {
-  intro(VERSION, { commands: true, contextBar: (await fetchHints()) || undefined });
+  intro(VERSION, { contextBar: (await fetchHints()) || undefined });
 
   while (true) {
     const action = await prompts.select({
@@ -170,7 +164,7 @@ async function campaignDrillDown(): Promise<void> {
     if (prompts.isCancel(drill) || drill === "back") return;
 
     blank();
-    await showCampaign(drill, {});
+    await runCommand(["campaigns", "show", drill]);
     if ((await campaignActionMenu(drill)) !== "back") return;
   }
 }
@@ -192,7 +186,7 @@ const CAMPAIGN_MENU: Record<string, () => Promise<void>> = {
     const id = await requiredText("Campaign ID");
     if (!id) return;
     blank();
-    await showCampaign(id, {});
+    await runCommand(["campaigns", "show", id]);
   },
   create: createCampaignPrompt,
   status: () => withCampaign("Which campaign?", async (id) => void (await statusPrompt(id))),
@@ -267,14 +261,14 @@ const CONTACT_MENU: Record<string, () => Promise<void>> = {
     const idOrEmail = await requiredText("Contact ID or email");
     if (!idOrEmail) return;
     blank();
-    await showContact(idOrEmail, {});
+    await runCommand(["contacts", "show", idOrEmail]);
     await contactActionMenu(idOrEmail);
   },
   history: async () => {
     const idOrEmail = await requiredText("Contact ID or email");
     if (!idOrEmail) return;
     blank();
-    await showHistory(idOrEmail, {});
+    await runCommand(["contacts", "history", idOrEmail]);
   },
   add: addContactPrompt,
 };
@@ -343,7 +337,7 @@ async function contactListDrillDown(contacts: ContactRow[]): Promise<void> {
     if (prompts.isCancel(drill) || drill === "back") return;
 
     blank();
-    await showContact(drill, {});
+    await runCommand(["contacts", "show", drill]);
     await contactActionMenu(drill);
   }
 }

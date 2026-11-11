@@ -5,13 +5,33 @@
 
 import { Command } from "commander";
 import * as clack from "@clack/prompts";
-import { saveConfig, loadConfig } from "../auth.js";
+import { saveConfig, loadConfig, fileApiKey, CONFIG_FILE } from "../auth.js";
 import { verifyApiKey } from "../lib/rest.js";
 import { checkApiKeyFormat } from "../lib/key-validation.js";
 import { openUrl } from "../lib/browser.js";
 import * as out from "../output.js";
 
 const API_KEYS_URL = "https://totalaudiopromo.com/settings/api-keys";
+
+/**
+ * The scopes each command needs, from the hasScope checks in the v1 routes it
+ * calls. Outcomes are logged and read under campaigns:*; the outreach queue
+ * that `tap send` reads needs pitches:read.
+ */
+const COMMAND_SCOPES: Array<[string, string]> = [
+  ["campaigns:read", "campaigns, send, pitch, contacts show"],
+  ["campaigns:write", "campaigns create/status, outcome, import --campaign"],
+  ["contacts:read contacts:write", "contacts, import, open"],
+  ["pitches:read", "send"],
+  ["pitches:write", "pitch"],
+  ["actions:read", "queue"],
+  ["skills:read skills:write", "skill"],
+  ["enrich", "contacts enrich (spends enrichments)"],
+];
+
+function keySourceLabel(source: "env" | "file" | undefined): string {
+  return source === "env" ? "(from TAP_API_KEY)" : `(from ${CONFIG_FILE})`;
+}
 
 export function authCommand(): Command {
   const cmd = new Command("auth").description("Manage authentication");
@@ -34,8 +54,11 @@ export function authCommand(): Command {
         return;
       }
       out.success("Authenticated (REST v1)");
-      out.info(`API key:  ${config.apiKey.slice(0, 15)}...`);
-      out.info(`Base URL: ${config.tapUrl ?? "https://totalaudiopromo.com"}`);
+      out.info(`API key:  ${config.apiKey.slice(0, 15)}...  ${keySourceLabel(config.apiKeySource)}`);
+      if (config.apiKeySource === "env" && fileApiKey()) {
+        out.warn(`TAP_API_KEY overrides the key saved in ${CONFIG_FILE}.`);
+      }
+      out.info(`Base URL: ${config.tapUrl ?? "https://totalaudiopromo.com"}${process.env.TAP_URL ? "  (from TAP_URL)" : ""}`);
     });
 
   return cmd;
@@ -47,10 +70,8 @@ async function runRestLogin(): Promise<void> {
     [
       "1. Sign in to https://totalaudiopromo.com",
       "2. Go to Settings → API Keys",
-      "3. Mint a key — choose the scopes you need:",
-      "   campaigns:read campaigns:write pitches:read pitches:write",
-      "   outcomes:read outcomes:write skills:read skills:write",
-      "   approvals:read webhooks:read webhooks:write enrich validate",
+      "3. Mint a key with the scopes for the commands you use:",
+      ...COMMAND_SCOPES.map(([scopes, commands]) => `   ${scopes.padEnd(34)}${commands}`),
       "4. Copy the key that starts with tap_ak_ and paste it below.",
     ].join("\n"),
     "Where to find your API key",
@@ -104,12 +125,7 @@ async function runRestLogin(): Promise<void> {
       : "Key verified (no campaigns:read scope — some commands will need a broader key)",
   );
 
-  const existing = loadConfig() ?? {};
-  saveConfig({
-    ...existing,
-    apiKey: apiKey as string,
-    tapUrl: resolvedUrl,
-  });
+  saveConfig({ apiKey: apiKey as string, tapUrl: resolvedUrl });
 
   clack.outro(
     "Credentials saved to ~/.tap/config.json. Try `tap skill list` to confirm, then `tap mcp setup` to wire up an MCP client.",
@@ -119,7 +135,10 @@ async function runRestLogin(): Promise<void> {
 function reportVerifyFailure(
   result: Extract<Awaited<ReturnType<typeof verifyApiKey>>, { ok: false }>,
 ): void {
-  if (result.reason === "invalid-key") {
+  if (result.reason === "plan") {
+    clack.log.error(result.message);
+    clack.log.info("See https://totalaudiopromo.com/settings/billing.");
+  } else if (result.reason === "invalid-key") {
     clack.log.error("TAP rejected that key (401) — check you copied it in full.");
   } else if (result.reason === "network") {
     clack.log.error(`Could not reach TAP: ${result.message}`);

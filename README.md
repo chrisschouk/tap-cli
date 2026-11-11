@@ -141,7 +141,7 @@ tap
 
 ```bash
 tap auth login              # default flow — asks for a tap_ak_* key
-tap auth status             # show current auth mode + scopes
+tap auth status             # show the key in use and where it came from (TAP_API_KEY or ~/.tap/config.json)
 ```
 
 `tap auth login` offers to open the Settings → API Keys page in your browser, then verifies
@@ -222,14 +222,9 @@ tap campaigns status <id> completed
 ### `tap contacts` — manage contacts
 
 ```bash
-tap contacts list                              # list contacts (50 per page)
-tap contacts list --warm                       # warm and hot contacts only
-tap contacts list --bbc                        # BBC contacts only
-tap contacts list --genre "Indie"              # filter by genre
-tap contacts list --sort warmth                # sort by warmth score
-tap contacts list --sort response              # sort by response rate
-tap contacts list --sort last-contacted
-tap contacts list -l 20 --page 2              # paginate
+tap contacts list                              # newest 50 contacts
+tap contacts list --platform radio             # one platform type
+tap contacts list -l 200 --page 2              # paginate (up to 200 per page)
 tap contacts list --json
 
 tap contacts show <id-or-email>               # full contact detail: relationship metrics, campaigns, intelligence
@@ -238,11 +233,11 @@ tap contacts show <id-or-email> --json
 tap contacts history <id-or-email>            # cross-campaign timeline
 tap contacts history <id-or-email> -l 100     # up to 100 events
 
-tap contacts search "Radio 1"                 # search by name, email, outlet, or BBC station
+tap contacts search "Radio 1"                 # search by name, email or outlet
 tap contacts search "Radio 1" --json
 
 tap contacts add -n "Name" -e "email@outlet.com"
-tap contacts add -n "Name" -e "email@outlet.com" -o "BBC Radio 6 Music" -r presenter -g "Indie,Alternative" -p radio --bbc-station "BBC Radio 6 Music"
+tap contacts add -n "Name" -e "email@outlet.com" -o "BBC Radio 6 Music" -r presenter -g "Indie,Alternative" -p radio
 
 tap contacts enrich <id>                      # queue contact for AI enrichment
 ```
@@ -251,13 +246,12 @@ tap contacts enrich <id>                      # queue contact for AI enrichment
 
 | Flag | Description |
 |------|-------------|
-| `-s, --status` | Pipeline status filter |
-| `-g, --genre` | Genre filter |
-| `--bbc` | BBC contacts only |
-| `--warm` | Warm and hot contacts only |
-| `--sort` | Sort by: `name`, `warmth`, `response`, `last-contacted` |
-| `-l, --limit` | Results per page (default: 50) |
+| `--platform` | Platform type: `radio`, `press`, `playlist`, `podcast`, `blog` |
+| `-l, --limit` | Results per page, up to 200 (default: 50) |
 | `-p, --page` | Page number (default: 1) |
+
+These are the filters `GET /api/v1/contacts` supports. It returns name, email, outlet, role,
+platform type and enrichment state, so the list shows those.
 
 **`contacts add` flags:**
 
@@ -269,7 +263,6 @@ tap contacts enrich <id>                      # queue contact for AI enrichment
 | `-r, --role` | Role: `presenter`, `producer`, `journalist`, `playlist_curator` |
 | `-g, --genre` | Genres, comma-separated |
 | `-p, --platform` | Platform type: `radio`, `press`, `playlist`, `podcast`, `blog` |
-| `-b, --bbc-station` | BBC station name |
 
 ---
 
@@ -295,7 +288,7 @@ tap pitch <campaign-id> <contact-id> --json
 
 ### `tap send` — see what waits for your approval
 
-Approving and sending a pitch happen in TAP, by you. `tap send` lists the campaign's pitches that are drafts, waiting for approval, or approved and not sent yet, then prints the link to the release's pitching tab where you approve and send them.
+Approving and sending a pitch happen in TAP, by you. `tap send` lists every one of the campaign's pitches that still needs you: drafts, pitches waiting for approval, approved pitches TAP has not sent yet, and approved pitches whose send failed or is held for payment. It then prints the link to the release's pitching tab where you approve and send them.
 
 ```bash
 tap send <campaign-id>
@@ -375,41 +368,55 @@ tap discover
 
 ---
 
-### `tap import` — import contacts from file or stdin
+### `tap import`: contacts from sink, CSV or JSON
 
-Accepts CSV, JSON, JSONL, or sink-cli output. Deduplicates against existing contacts before inserting.
+Reads a CSV, JSON or JSONL file, or stdin when you pass `-`. It understands
+[sink](https://www.npmjs.com/package/datasink) output directly, in every format `sink` writes:
+the `--json` envelope from `sink wash`, and `--format json`, `jsonl` or `csv` files from
+`sink wash`, `sink scrub` or `sink drain`. It uses sink's corrected email, skips rows sink
+marked as duplicates or invalid, and sends up to 500 contacts per request.
 
 ```bash
-tap import contacts.csv
-tap import enriched.json
-tap import contacts.csv --campaign <campaign-id>    # also add to a campaign
-tap import contacts.csv --enrich                    # queue unenriched contacts for enrichment
-tap import contacts.csv --dry-run                  # preview without importing
-tap import contacts.csv --yes                      # skip confirmation
+# clean with sink, then import in one pipe (piping needs --yes)
+sink wash contacts.csv --json -q | tap import - --yes
 
-# pipe from sink-cli
-sink wash contacts.csv --json | tap import --stdin
+# no global install: run sink through npx
+npx -y datasink wash contacts.csv --json -q | tap import - --yes
+
+# or keep sink's file and import it later
+sink wash contacts.csv --format json -o washed.json
+tap import washed.json --campaign <campaign-id>
+
+# run sink wash for you, when sink is on your PATH
+tap import contacts.csv --wash
+
+tap import contacts.csv --dry-run                  # parse and count without calling TAP
 ```
+
+TAP stores email, name, outlet, role, platform type, genres, geographic scope and notes. Other
+columns and sink's other enrichment (phone, website, best timing, pitch tips, steep's socials
+and portals) are not stored, and `tap import` names them once so you know they stay in your file.
 
 **Flags:**
 
 | Flag | Description |
 |------|-------------|
-| `--stdin` | Read from stdin (for piping from sink-cli) |
-| `--yes` | Skip confirmation prompt |
-| `--dry-run` | Preview parse and deduplication without importing |
-| `--campaign` | Add imported contacts to this campaign ID |
-| `--enrich` | Queue unenriched contacts for AI enrichment |
+| `-` or `--stdin` | Read from stdin |
+| `--wash` | Run `sink wash` on the file first (needs `sink` on your PATH: `npm i -g datasink`) |
+| `--yes` | Skip confirmation (required when piping) |
+| `--dry-run` | Parse and count without calling TAP |
+| `--campaign <id>` | Add every contact in the file to this campaign, including ones already in TAP |
+| `--json` | Counts as JSON |
 
 ---
 
 ### `tap watch` — follow a campaign in TAP
 
-The TAP API has no activity feed yet, so `tap watch` prints the TAP page to follow instead: the release's activity tab, or your releases list.
+The TAP API has no activity feed yet, so `tap watch` prints the TAP page to follow instead: the release's Results tab, or your releases list.
 
 ```bash
 tap watch                           # releases list
-tap watch <campaign-id>             # that release's activity tab
+tap watch <campaign-id>             # that release's Results tab
 ```
 
 ---

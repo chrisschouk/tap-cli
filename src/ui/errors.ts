@@ -14,13 +14,30 @@ interface FormattedError {
   hint?: string;
 }
 
+/**
+ * Thrown in place of `process.exit` while interactive mode runs a command, so
+ * a failing command ends that command and not the session.
+ */
+export class CommandExit extends Error {
+  constructor(public readonly code: number) {
+    super(`exit ${code}`);
+    this.name = "CommandExit";
+  }
+}
+
 const API_STATUS_HINT: Record<number, string> = {
   401: "Run `tap auth login` with a current tap_ak_ key.",
   402: "The TAP API needs the year plan. See https://totalaudiopromo.com/settings/billing.",
-  403: "Your API key lacks the scope for this command. Mint a broader key in Settings, API keys.",
   404: "Check the ID and try again.",
   429: "Rate limit reached. Wait a minute and try again.",
 };
+
+/** TAP answers a missing scope with "Insufficient scope: <scope> required". */
+function apiHint(err: TapApiError): string | undefined {
+  const scope = /Insufficient scope: (\S+) required/.exec(err.message)?.[1];
+  if (scope) return `Mint a key with ${scope} in Settings, API keys, then run \`tap auth login\`.`;
+  return API_STATUS_HINT[err.status];
+}
 
 function formatError(err: unknown): FormattedError {
   if (!(err instanceof Error)) {
@@ -28,7 +45,7 @@ function formatError(err: unknown): FormattedError {
   }
 
   if (err instanceof TapApiError) {
-    return { message: err.message, hint: API_STATUS_HINT[err.status] };
+    return { message: err.message, hint: apiHint(err) };
   }
 
   const msg = err.message;
@@ -98,6 +115,7 @@ function formatError(err: unknown): FormattedError {
  * Print a formatted error with optional hint line.
  */
 export function handleError(err: unknown): void {
+  if (err instanceof CommandExit) throw err;
   const { message, hint } = formatError(err);
   console.error(`  ${chalk.red(GLYPH.cross)} ${message}`);
   if (hint) {

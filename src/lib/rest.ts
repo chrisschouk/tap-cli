@@ -33,6 +33,30 @@ export function getApiKey(): string | null {
   return loadConfig()?.apiKey ?? null;
 }
 
+/** Every v1 list route caps `limit` at 200. */
+export const MAX_PAGE_SIZE = 200;
+
+/**
+ * Read every page of a v1 list route. List routes answer
+ * `{ [key]: T[], total }` and clamp `limit` to 200, so one page can hide rows.
+ */
+export async function fetchAllPages<T>(
+  path: string,
+  key: string,
+  query: RestRequestInit["query"] = {},
+): Promise<T[]> {
+  const rows: T[] = [];
+  for (let page = 1; ; page++) {
+    const res = await restRequest<Record<string, unknown>>(path, {
+      query: { ...query, limit: MAX_PAGE_SIZE, page },
+    });
+    const batch = (res[key] as T[] | undefined) ?? [];
+    rows.push(...batch);
+    const total = typeof res.total === "number" ? res.total : rows.length;
+    if (batch.length < MAX_PAGE_SIZE || rows.length >= total) return rows;
+  }
+}
+
 export async function restRequest<T = unknown>(
   path: string,
   init: RestRequestInit = {},
@@ -98,7 +122,7 @@ function errorMessage(json: unknown): string | null {
 
 export type ApiKeyCheckResult =
   | { ok: true; scoped: boolean }
-  | { ok: false; reason: "invalid-key" | "network" | "unknown"; message: string };
+  | { ok: false; reason: "invalid-key" | "plan" | "network" | "unknown"; message: string };
 
 /**
  * Cheap, read-only call used to verify a pasted key actually
@@ -107,7 +131,8 @@ export type ApiKeyCheckResult =
  *
  * A 401 means the key itself is bad. A 403 means the key is valid but
  * lacks `campaigns:read` — still worth saving, so that's reported as
- * `ok: true, scoped: false`.
+ * `ok: true, scoped: false`. A 402 means the workspace is not on the year
+ * plan; TAP's own message says so.
  */
 export async function verifyApiKey(
   apiKey: string,
@@ -129,6 +154,10 @@ export async function verifyApiKey(
     }
     if (res.status === 403) {
       return { ok: true, scoped: false };
+    }
+    if (res.status === 402) {
+      const message = errorMessage(await res.json().catch(() => null));
+      return { ok: false, reason: "plan", message: message ?? "This API key needs the TAP year plan." };
     }
     if (!res.ok) {
       return {

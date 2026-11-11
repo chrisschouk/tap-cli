@@ -20,6 +20,7 @@ import {
   fetchPendingPitches,
   PENDING_STATE_LABEL,
   type PendingPitch,
+  type PendingState,
 } from "../lib/pending-pitches.js";
 import * as out from "../output.js";
 import { COLOUR } from "../ui/theme.js";
@@ -33,10 +34,18 @@ interface CampaignRow {
   artist_name: string | null;
 }
 
+const STATE_COLOUR: Record<PendingState, string> = {
+  draft: COLOUR.muted,
+  pending_approval: COLOUR.warning,
+  approved: COLOUR.success,
+  send_failed: COLOUR.danger,
+  held_for_payment: COLOUR.warning,
+};
+
 function renderPending(pitches: PendingPitch[]): void {
   const rows = pitches.map((p) => [
     out.truncate(p.subject, 40) || "",
-    chalk.hex(p.state === "approved" ? COLOUR.success : COLOUR.warning)(PENDING_STATE_LABEL[p.state]),
+    chalk.hex(STATE_COLOUR[p.state])(PENDING_STATE_LABEL[p.state]),
     shortDate(p.scheduledFor),
   ]);
   blank();
@@ -65,7 +74,7 @@ export function sendCommand(): Command {
           return;
         }
 
-        rail.succeed(`Loading pitches          ${campaignLabel(campaign)}`);
+        rail.succeed("Loaded", `${campaignLabel(campaign)}, ${pending.length} pitches still need you`);
 
         if (pending.length === 0) {
           out.info("Nothing is waiting for approval in this campaign");
@@ -83,7 +92,7 @@ export function sendCommand(): Command {
         navHint([`tap send ${campaignId} --open`, `tap campaigns show ${campaignId}`]);
         blank();
       } catch (err) {
-        rail.fail("Loading pitches");
+        rail.fail("Could not load pitches");
         handleError(err);
         process.exit(1);
       }

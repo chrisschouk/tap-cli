@@ -20,6 +20,9 @@ import { createRailSpinner, divider, blank } from "../ui/format.js";
 import { handleError } from "../ui/errors.js";
 import { navHint } from "../ui/detail.js";
 
+/** Pitch statuses TAP treats as not pitched yet (see apps/tap/lib/releases/thread.ts). */
+const UNPITCHED = new Set<string | null>([null, "not_pitched", "not_started"]);
+
 export function pitchCommand(): Command {
   return new Command("pitch")
     .description("Generate AI pitch drafts for a campaign")
@@ -27,8 +30,7 @@ export function pitchCommand(): Command {
     .argument("[contact-id]", "Contact ID (interactive selection if omitted)")
     .option(
       "--tone <tone>",
-      "Tone: professional, casual, enthusiastic",
-      "professional",
+      "Tone: professional, casual, enthusiastic (default: TAP varies the tone across variants)",
     )
     .option("--dry-run", "Show what would be generated without generating")
     .option("--json", "Output as JSON")
@@ -42,7 +44,7 @@ export function pitchCommand(): Command {
           });
           spinner.stop();
 
-          const unpitched = contactsRes.contacts.filter(c => !c.pitch_status || c.pitch_status === "not_pitched");
+          const unpitched = contactsRes.contacts.filter((c) => UNPITCHED.has(c.pitch_status ?? null));
 
           if (unpitched.length === 0) {
             out.info("No unpitched contacts in this campaign");
