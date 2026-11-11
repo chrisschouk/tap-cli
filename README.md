@@ -59,12 +59,9 @@
 |---|---|---|
 | 🚀 | **Campaign management** | Create, list, filter, and update campaigns from the terminal |
 | 👤 | **Contact management** | Search, add, enrich, and import contacts with deduplication |
-| ✍️ | **AI pitch drafting** | Generate three pitch variants (Direct, Story, Value) per contact |
-| 📬 | **Send via Gmail** | Drafted pitches go through your connected Gmail — with daily send caps |
-| 📊 | **Workspace stats** | Quick overview of campaign health, contact warmth, and queue status |
-| 🔍 | **Contact discovery** | Find radio and press contacts via Perplexity, deduplicated against your workspace |
-| 👀 | **Live monitor** | Poll your workspace every 30s and render a compact live dashboard |
-| 📋 | **Approval queue** | See what needs you today: follow-ups, unpitched contacts, pending sends |
+| ✍️ | **AI pitch drafting** | TAP drafts pitch variants per contact and saves them for your review |
+| 📬 | **Approve in TAP** | See which pitches wait for you and jump straight to where you approve and send them |
+| 📋 | **Action queue** | See what needs you today: follow-ups, replies, stalled campaigns, coverage to log |
 | 🧠 | **Skills** | List, run, fork, and inspect workspace skills from the terminal |
 | 🔐 | **Scoped keys** | Same `tap_ak_*` keys as the REST API and MCP server |
 
@@ -278,14 +275,12 @@ tap contacts enrich <id>                      # queue contact for AI enrichment
 
 ### `tap pitch` — generate AI pitch drafts
 
-Generates three pitch variants (Direct, Story, Value) tailored to the contact's enrichment data, relationship history, and your campaign brief. Requires `OPENROUTER_API_KEY`. Drafts come from `deepseek/deepseek-v4.1-flash`, with `~z-ai/glm-flash-latest` as the fallback.
+Asks TAP to draft pitch variants for one contact in a campaign. TAP saves the draft for review. It never sends.
 
 ```bash
 tap pitch <campaign-id>                                  # interactive contact selection
 tap pitch <campaign-id> <contact-id>                     # specific contact
-tap pitch <campaign-id> <contact-id> --hook "BBC 6 Music session artist"
 tap pitch <campaign-id> <contact-id> --tone casual
-tap pitch <campaign-id> --dry-run                        # show gathered context without generating
 tap pitch <campaign-id> <contact-id> --json
 ```
 
@@ -293,39 +288,33 @@ tap pitch <campaign-id> <contact-id> --json
 
 | Flag | Description |
 |------|-------------|
-| `--hook` | Key hook for the pitch — what makes this release special |
 | `--tone` | Tone: `professional` (default), `casual`, `enthusiastic` |
-| `--dry-run` | Print the gathered context without calling the AI |
-
-If `--hook` is omitted, you'll be prompted interactively.
+| `--dry-run` | Say what would be generated without generating |
 
 ---
 
-### `tap send` — send a pitch via Gmail
+### `tap send` — see what waits for your approval
 
-Sends a draft pitch through your connected Gmail account. Checks relationship warnings (cooling off, recent declines, over-pitching) before sending. Requires a Gmail connection in TAP settings.
+Approving and sending a pitch happen in TAP, by you. `tap send` lists the campaign's pitches that are drafts, waiting for approval, or approved and not sent yet, then prints the link to the release's pitching tab where you approve and send them.
 
 ```bash
-tap send <pitch-id>
-tap send <pitch-id> --dry-run     # preview without sending
-tap send <pitch-id> --confirm     # skip confirmation prompt
-tap send <pitch-id> --json
+tap send <campaign-id>
+tap send <campaign-id> --open     # also open the link in your browser
+tap send <campaign-id> --json
 ```
-
-Daily send cap: 50 emails. Status and timestamps are written back to the pitch and campaign contact records automatically.
 
 ---
 
 ### `tap outcome` — log a campaign outcome
 
 ```bash
-tap outcome <campaign-id> <contact-id> replied
-tap outcome <campaign-id> <contact-id> played --channel radio
-tap outcome <campaign-id> <contact-id> replied --notes "Loved it, wants exclusive"
+tap outcome <campaign-id> <contact-id> replied_positive
+tap outcome <campaign-id> <contact-id> coverage --channel radio
+tap outcome <campaign-id> <contact-id> replied_positive --notes "Loved it, wants exclusive"
 tap outcome <campaign-id> <contact-id> declined --dry-run
 ```
 
-**Outcome types:** `pitched`, `opened`, `replied`, `interested`, `played`, `covered`, `added`, `declined`, `passed`, `bounced`, `no_response`, `called`, `follow_up_scheduled`
+**Outcome types:** `no_response`, `opened`, `replied_positive`, `replied_negative`, `added_to_playlist`, `interview_booked`, `coverage`, `declined`, `other`. The older words `replied`, `interested`, `played`, `covered`, `added` and `passed` still work and map to these.
 
 **Flags:**
 
@@ -333,9 +322,9 @@ tap outcome <campaign-id> <contact-id> declined --dry-run
 |------|-------------|
 | `-n, --notes` | Notes about the outcome |
 | `-c, --channel` | Channel: `radio`, `press`, `playlist`, `sync` |
-| `--dry-run` | Preview the status changes without saving |
+| `--dry-run` | Preview without saving |
 
-Logging an outcome updates the contact's pitch status and pipeline status automatically.
+TAP updates the contact's pitch status when the outcome is logged.
 
 ---
 
@@ -366,7 +355,7 @@ tap skill invocation <invocation-id>    # audit row inspector
 
 ### `tap queue` — daily action queue
 
-Shows what needs attention today: follow-ups due, unpitched contacts in active campaigns, unenriched contacts.
+Shows TAP's action list, the same one as your Home page: follow-ups due, unread replies, stalled campaigns, contacts going cold and coverage to log.
 
 ```bash
 tap queue
@@ -375,39 +364,14 @@ tap queue --json
 
 ---
 
-### `tap stats` — workspace metrics
+### `tap stats` and `tap discover` — open in TAP
 
-High-level overview of your workspace: total contacts, active campaigns, pitches sent, outcomes logged.
+The TAP API has no endpoint for workspace statistics or contact discovery yet. Both commands print the TAP page that has them: your Home page for stats, the contacts page for discovery.
 
 ```bash
 tap stats
-tap stats --json
+tap discover
 ```
-
----
-
-### `tap discover` — AI-powered contact discovery
-
-Uses Perplexity to find radio and press contacts matching your search. Deduplicates against existing contacts before importing. Requires `PERPLEXITY_API_KEY`.
-
-```bash
-tap discover "BBC Radio 6 Music"
-tap discover --station "Kiss FM" --genre dance
-tap discover --genre electronic --region london
-tap discover "BBC Radio 6 Music" --import --enrich    # import all and queue for enrichment
-tap discover "BBC Radio 6 Music" --limit 20 --json
-```
-
-**Flags:**
-
-| Flag | Description |
-|------|-------------|
-| `--genre` | Filter by genre |
-| `--region` | Filter by region |
-| `--station` | Specific station lookup |
-| `--import` | Auto-import all without prompting |
-| `--enrich` | Queue imported contacts for AI enrichment |
-| `-l, --limit` | Max results (default: 10) |
 
 ---
 
@@ -439,18 +403,14 @@ sink wash contacts.csv --json | tap import --stdin
 
 ---
 
-### `tap watch` — live campaign monitor
+### `tap watch` — follow a campaign in TAP
 
-Polls your workspace every 30 seconds and renders a compact live dashboard. Press `r` to refresh manually, `Ctrl+C` to exit.
+The TAP API has no activity feed yet, so `tap watch` prints the TAP page to follow instead: the release's activity tab, or your releases list.
 
 ```bash
-tap watch                           # workspace overview (all active campaigns)
-tap watch <campaign-id>             # focused view for one campaign
-tap watch --interval 60             # poll every 60 seconds (minimum: 10)
-tap watch --no-clear                # log mode — append instead of redrawing
+tap watch                           # releases list
+tap watch <campaign-id>             # that release's activity tab
 ```
-
-Campaign focus mode shows pitch funnel, recent activity from the last 2 hours, and coverage clips. Workspace mode shows all active campaigns with pitch and reply rates, plus the action queue summary.
 
 ---
 
@@ -472,7 +432,6 @@ All commands accept these flags:
 
 | Flag | Description |
 |------|-------------|
-| `-w, --workspace <id>` | Target a specific workspace ID |
 | `--json` | Output as JSON (most commands) |
 | `-v, --version` | Print version |
 
@@ -484,32 +443,27 @@ Credentials are stored at `~/.tap/config.json` (automatically created by `tap au
 
 ```json
 {
-  "apiKey": "tap_ak_live_...",
-  "apiUrl": "https://totalaudiopromo.com/api/v1",
-  "workspaceId": "ws_..."
+  "apiKey": "tap_ak_...",
+  "tapUrl": "https://totalaudiopromo.com"
 }
 ```
+
+Your key decides the workspace. Older config files with `supabaseUrl` or `supabaseKey` are ignored, and `tap auth login` rewrites the file without them.
 
 Environment variables override config file values:
 
 | Variable | Description |
 |----------|-------------|
 | `TAP_API_KEY` | Your scoped API key (overrides config) |
-| `TAP_API_URL` | API base URL (default: `https://totalaudiopromo.com/api/v1`) |
-| `TAP_WORKSPACE_ID` | Default workspace ID |
-| `OPENROUTER_API_KEY` | Required for `tap pitch` |
-| `PERPLEXITY_API_KEY` | Required for `tap discover` |
+| `TAP_URL` | TAP base URL (default: `https://totalaudiopromo.com`) |
 
 ---
 
 ## Requirements
 
 - **Node.js 20** or later
-- A **TAP account** with a release pack (get one at [totalaudiopromo.com](https://totalaudiopromo.com))
+- A **TAP account** on the year plan, the only plan with API access (see [totalaudiopromo.com](https://totalaudiopromo.com))
 - A **scoped API key** from Settings → API Keys inside your workspace
-- `OPENROUTER_API_KEY` for AI pitch generation (`tap pitch`)
-- `PERPLEXITY_API_KEY` for contact discovery (`tap discover`)
-- **Gmail connected** in TAP settings for sending (`tap send`)
 
 ---
 

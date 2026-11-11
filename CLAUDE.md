@@ -28,14 +28,17 @@ The `prepublishOnly` hook runs `pnpm test && pnpm build` automatically.
 - `contacts search <query>` / `contacts add`
 - `pitch <campaign-id>` — draft a pitch
 - `outcome <campaign-id> <contact-id> <type>` — log an outcome
-- `queue` — view the approval queue
-- `stats` — campaign statistics
+- `queue` — TAP's action list
+- `stats` — prints the TAP Home link (no stats endpoint in v1)
 - `open [id]` — open a record in the browser
-- `send` — propose a send (goes into approval queue, not direct send)
-- `discover` — contact discovery
+- `send <campaign-id>` — lists pitches waiting for approval and links to where the artist approves and sends in TAP. Never sends.
+- `discover` — prints the TAP contacts link (no discovery endpoint in v1)
 - `import` — bulk import contacts
 - `skill` — run a TAP skill
-- `watch` — watch for activity
+- `watch` — prints the release activity link (no activity feed in v1)
+
+Every command goes through `lib/rest.ts` `restRequest()`. There is no Supabase client. Approving and
+sending a pitch are human-only in TAP: never add a CLI path that approves or sends.
 
 ## Publish flow (npm)
 
