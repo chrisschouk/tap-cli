@@ -16,65 +16,18 @@
  *   tap open [id]
  */
 
-import { Command } from "commander";
-import { campaignsCommand } from "./commands/campaigns.js";
-import { contactsCommand } from "./commands/contacts.js";
-import { queueCommand } from "./commands/queue.js";
-import { statsCommand } from "./commands/stats.js";
-import { authCommand } from "./commands/auth.js";
-import { outcomeCommand } from "./commands/outcome.js";
-import { pitchCommand } from "./commands/pitch.js";
-import { openCommand } from "./commands/open.js";
-import { sendCommand } from "./commands/send.js";
-import { discoverCommand } from "./commands/discover.js";
-import { importCommand } from "./commands/import.js";
-import { watchCommand } from "./commands/watch.js";
-import { skillCommand } from "./commands/skill.js";
-import { mcpCommand, connectCommand } from "./commands/mcp.js";
-import { doctorCommand } from "./commands/doctor.js";
+import chalk from "chalk";
 import { intro } from "./ui/format.js";
+import { buildProgram, VERSION } from "./program.js";
 
-export const VERSION = "0.5.0";
+// chalk ignores NO_COLOR (https://no-color.org); honour it here.
+if (process.env.NO_COLOR) chalk.level = 0;
 
 // Restore cursor visibility if user hits Ctrl+C during a spinner
 process.on("SIGINT", () => {
   process.stdout.write("\x1B[?25h");
   process.exit(130);
 });
-
-/**
- * Build the Commander program with all commands registered.
- * Shared by both direct CLI invocation and interactive mode.
- */
-export function buildProgram(): Command {
-  const program = new Command();
-
-  program
-    .name("tap")
-    .description(
-      "Total Audio Platform CLI -- manage campaigns, contacts, and pitches from the terminal",
-    )
-    .version(VERSION, "-v, --version");
-
-  program.addCommand(authCommand());
-  program.addCommand(campaignsCommand());
-  program.addCommand(connectCommand());
-  program.addCommand(contactsCommand());
-  program.addCommand(discoverCommand());
-  program.addCommand(doctorCommand());
-  program.addCommand(importCommand());
-  program.addCommand(mcpCommand());
-  program.addCommand(outcomeCommand());
-  program.addCommand(pitchCommand());
-  program.addCommand(openCommand());
-  program.addCommand(queueCommand());
-  program.addCommand(sendCommand());
-  program.addCommand(skillCommand());
-  program.addCommand(statsCommand());
-  program.addCommand(watchCommand());
-
-  return program;
-}
 
 // Handle --version/-v before Commander
 const hasVersionFlag = process.argv.includes("--version") || process.argv.includes("-v");

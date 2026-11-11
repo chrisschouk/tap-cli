@@ -8,19 +8,36 @@
  */
 
 import { Command } from "commander";
-import { getClient, hasApiKey } from "../auth.js";
-import { restRequest } from "../lib/rest.js";
+import { restRequest, TapApiError } from "../lib/rest.js";
 import { openUrl } from "../lib/browser.js";
+import { dashboard } from "../lib/dashboard.js";
 import * as out from "../output.js";
 import { handleError } from "../ui/errors.js";
-
-const TAP_BASE = "https://tap.totalaudiopromo.com";
 
 function openInBrowser(url: string): void {
   openUrl(url, (message) => {
     out.error(`Failed to open browser: ${message}`);
     out.info(`URL: ${url}`);
   });
+}
+
+/** A record's dashboard URL if it exists. Only a 404 means "try the other type". */
+async function urlIfFound(path: string, url: string): Promise<string | null> {
+  try {
+    await restRequest(path);
+    return url;
+  } catch (err) {
+    if (err instanceof TapApiError && err.status === 404) return null;
+    throw err;
+  }
+}
+
+async function urlForFullId(id: string): Promise<string | null> {
+  const encoded = encodeURIComponent(id);
+  return (
+    (await urlIfFound(`/api/v1/contacts/${encoded}`, dashboard.contact(id))) ??
+    (await urlIfFound(`/api/v1/campaigns/${encoded}`, dashboard.release(id)))
+  );
 }
 
 export function openCommand(): Command {
@@ -31,7 +48,7 @@ export function openCommand(): Command {
     .action(async (id, opts) => {
       // No ID -- open TAP home
       if (!id) {
-        const url = TAP_BASE;
+        const url = dashboard.home();
         if (opts.url) {
           console.log(url);
         } else {
@@ -42,94 +59,38 @@ export function openCommand(): Command {
       }
 
       try {
-        if (hasApiKey()) {
-          let resolvedUrl: string | null = null;
-          let fullId = id;
+        let resolvedUrl: string | null = null;
+        let fullId = id;
 
-          // If id is shorter than 36, try fetching lists and looking for prefix
-          if (id.length < 36) {
-            // Check contacts first
-            const contactsRes = await restRequest<{ contacts: any[] }>("/api/v1/contacts", {
-              query: { limit: 100 },
-            });
-            const foundContact = contactsRes.contacts.find(c => c.id.startsWith(id));
-            if (foundContact) {
-              fullId = foundContact.id;
-              resolvedUrl = `${TAP_BASE}/contacts/${fullId}`;
-            } else {
-              // Check campaigns
-              const campaignsRes = await restRequest<{ campaigns: any[] }>("/api/v1/campaigns");
-              const foundCampaign = campaignsRes.campaigns.find(c => c.id.startsWith(id));
-              if (foundCampaign) {
-                fullId = foundCampaign.id;
-                resolvedUrl = `${TAP_BASE}/campaigns/${fullId}`;
-              }
-            }
+        // If id is shorter than 36, try fetching lists and looking for prefix
+        if (id.length < 36) {
+          // Check contacts first
+          const contactsRes = await restRequest<{ contacts: any[] }>("/api/v1/contacts", {
+            query: { limit: 100 },
+          });
+          const foundContact = contactsRes.contacts.find(c => c.id.startsWith(id));
+          if (foundContact) {
+            fullId = foundContact.id;
+            resolvedUrl = dashboard.contact(fullId);
           } else {
-            // Full UUID, try querying contact detail
-            try {
-              await restRequest(`/api/v1/contacts/${encodeURIComponent(id)}`);
-              resolvedUrl = `${TAP_BASE}/contacts/${id}`;
-            } catch {
-              try {
-                await restRequest(`/api/v1/campaigns/${encodeURIComponent(id)}`);
-                resolvedUrl = `${TAP_BASE}/campaigns/${id}`;
-              } catch {}
+            // Check campaigns
+            const campaignsRes = await restRequest<{ campaigns: any[] }>("/api/v1/campaigns");
+            const foundCampaign = campaignsRes.campaigns.find(c => c.id.startsWith(id));
+            if (foundCampaign) {
+              fullId = foundCampaign.id;
+              resolvedUrl = dashboard.release(fullId);
             }
           }
-
-          if (resolvedUrl) {
-            if (opts.url) {
-              console.log(resolvedUrl);
-            } else {
-              out.success(`Opening TAP item ${fullId.slice(0, 8)}...`);
-              openInBrowser(resolvedUrl);
-            }
-            return;
-          }
-
-          out.error(`No contact or campaign found with ID: ${id}`);
-          process.exit(1);
+        } else {
+          resolvedUrl = await urlForFullId(id);
         }
 
-        const supabase = getClient();
-
-        // Check contacts first (more common use case)
-        // Support UUID prefix matching so truncated IDs work
-        const { data: contact } = await supabase
-          .from("tap_contacts")
-          .select("id")
-          .ilike("id", `${id}%`)
-          .maybeSingle();
-
-        if (contact) {
-          const fullId = contact.id;
-          const url = `${TAP_BASE}/contacts/${fullId}`;
+        if (resolvedUrl) {
           if (opts.url) {
-            console.log(url);
+            console.log(resolvedUrl);
           } else {
-            out.success(`Opening contact ${fullId.slice(0, 8)}...`);
-            openInBrowser(url);
-          }
-          return;
-        }
-
-        // Check campaigns
-        // Support UUID prefix matching so truncated IDs work
-        const { data: campaign } = await supabase
-          .from("tap_projects")
-          .select("id")
-          .ilike("id", `${id}%`)
-          .maybeSingle();
-
-        if (campaign) {
-          const fullId = campaign.id;
-          const url = `${TAP_BASE}/campaigns/${fullId}`;
-          if (opts.url) {
-            console.log(url);
-          } else {
-            out.success(`Opening campaign ${fullId.slice(0, 8)}...`);
-            openInBrowser(url);
+            out.success(`Opening TAP item ${fullId.slice(0, 8)}...`);
+            openInBrowser(resolvedUrl);
           }
           return;
         }

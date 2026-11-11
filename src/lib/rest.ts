@@ -1,12 +1,8 @@
 /**
- * REST v1 client — proxies every read and write through
- * `https://totalaudiopromo.com/api/v1/*` with a workspace-scoped
- * `tap_ak_*` key.
- *
- * Mirrors `packages/tap-mcp/src/auth.ts → restRequest()` so the two
- * clients behave the same. Per Plan §Pillar 1, this is the way CLI and
- * MCP both consume TAP — Supabase service-role credentials stay
- * available for a 30-day deprecation window only.
+ * REST v1 client. Every CLI read and write goes through
+ * `https://totalaudiopromo.com/api/v1/*` with a workspace-scoped `tap_ak_*`
+ * key. Mirrors `packages/tap-mcp/src/auth.ts → restRequest()` so the CLI
+ * and MCP behave the same.
  */
 
 import { loadConfig } from "../auth.js";
@@ -29,31 +25,36 @@ export class TapApiError extends Error {
 
 const DEFAULT_BASE_URL = "https://totalaudiopromo.com";
 
-/**
- * Resolve the REST base URL. Order:
- *   1. TAP_URL env var
- *   2. config.tapUrl
- *   3. https://totalaudiopromo.com
- */
 export function getTapUrl(): string {
-  if (process.env.TAP_URL) return process.env.TAP_URL;
-  const config = loadConfig();
-  return config?.tapUrl || DEFAULT_BASE_URL;
+  return process.env.TAP_URL || loadConfig()?.tapUrl || DEFAULT_BASE_URL;
 }
+
+export function getApiKey(): string | null {
+  return loadConfig()?.apiKey ?? null;
+}
+
+/** Every v1 list route caps `limit` at 200. */
+export const MAX_PAGE_SIZE = 200;
 
 /**
- * Resolve the API key. Order:
- *   1. TAP_API_KEY env var
- *   2. config.apiKey
+ * Read every page of a v1 list route. List routes answer
+ * `{ [key]: T[], total }` and clamp `limit` to 200, so one page can hide rows.
  */
-export function getApiKey(): string | null {
-  if (process.env.TAP_API_KEY) return process.env.TAP_API_KEY;
-  const config = loadConfig();
-  return config?.apiKey ?? null;
-}
-
-export function hasApiKey(): boolean {
-  return Boolean(getApiKey());
+export async function fetchAllPages<T>(
+  path: string,
+  key: string,
+  query: RestRequestInit["query"] = {},
+): Promise<T[]> {
+  const rows: T[] = [];
+  for (let page = 1; ; page++) {
+    const res = await restRequest<Record<string, unknown>>(path, {
+      query: { ...query, limit: MAX_PAGE_SIZE, page },
+    });
+    const batch = (res[key] as T[] | undefined) ?? [];
+    rows.push(...batch);
+    const total = typeof res.total === "number" ? res.total : rows.length;
+    if (batch.length < MAX_PAGE_SIZE || rows.length >= total) return rows;
+  }
 }
 
 export async function restRequest<T = unknown>(
@@ -100,19 +101,28 @@ export async function restRequest<T = unknown>(
   }
 
   if (!res.ok) {
-    const errorMessage =
-      json && typeof json === "object" && "error" in (json as Record<string, unknown>)
-        ? String((json as Record<string, unknown>).error)
-        : text || res.statusText;
-    throw new TapApiError(res.status, errorMessage);
+    throw new TapApiError(res.status, errorMessage(json) || text || res.statusText);
   }
 
   return (json as T) ?? ({} as T);
 }
 
+/**
+ * TAP returns `{ error: "..." }` from most routes and
+ * `{ success: false, error: { code, message } }` from plan and availability
+ * guards (402, 503).
+ */
+function errorMessage(json: unknown): string | null {
+  if (!json || typeof json !== "object" || !("error" in json)) return null;
+  const error = (json as { error: unknown }).error;
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object" && "message" in error) return String(error.message);
+  return null;
+}
+
 export type ApiKeyCheckResult =
   | { ok: true; scoped: boolean }
-  | { ok: false; reason: "invalid-key" | "network" | "unknown"; message: string };
+  | { ok: false; reason: "invalid-key" | "plan" | "network" | "unknown"; message: string };
 
 /**
  * Cheap, read-only call used to verify a pasted key actually
@@ -121,7 +131,8 @@ export type ApiKeyCheckResult =
  *
  * A 401 means the key itself is bad. A 403 means the key is valid but
  * lacks `campaigns:read` — still worth saving, so that's reported as
- * `ok: true, scoped: false`.
+ * `ok: true, scoped: false`. A 402 means the workspace is not on the year
+ * plan; TAP's own message says so.
  */
 export async function verifyApiKey(
   apiKey: string,
@@ -143,6 +154,10 @@ export async function verifyApiKey(
     }
     if (res.status === 403) {
       return { ok: true, scoped: false };
+    }
+    if (res.status === 402) {
+      const message = errorMessage(await res.json().catch(() => null));
+      return { ok: false, reason: "plan", message: message ?? "This API key needs the TAP year plan." };
     }
     if (!res.ok) {
       return {

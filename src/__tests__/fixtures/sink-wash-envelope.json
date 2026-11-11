@@ -1,0 +1,201 @@
+{
+  "stats": {
+    "total": 5,
+    "scrub": {
+      "valid": 1,
+      "invalid": 1,
+      "risky": 3,
+      "typos": 1,
+      "domains": 3
+    },
+    "rinse": {
+      "duplicates": 1,
+      "merged": 1,
+      "fuzzyMatches": 0
+    },
+    "soak": {
+      "enriched": 0,
+      "failed": 0,
+      "skipped": 0
+    },
+    "steep": {
+      "outletsScraped": 0,
+      "outletsFromCache": 0,
+      "contactsMatched": 0,
+      "skipped": 0,
+      "failed": 0
+    },
+    "duration": 139
+  },
+  "records": [
+    {
+      "id": "wd94li9T4TKQoJXXHujM5",
+      "raw": {
+        "name": "Jo Presenter",
+        "outlet": "BBC Radio 6 Music",
+        "email": "jo@bbc.co.uk",
+        "role": "presenter",
+        "phone": "020 7946 0001",
+        "website": "https://bbc.co.uk/6music",
+        "notes": "Prefers links, not attachments",
+        "extras": {
+          "shows": "Friday Night"
+        }
+      },
+      "phases": [
+        "scrub",
+        "rinse"
+      ],
+      "timestamp": "2026-11-11T16:37:01.998Z",
+      "scrub": {
+        "email": {
+          "valid": true,
+          "normalised": "jo@bbc.co.uk",
+          "confidence": "medium",
+          "catchAll": true,
+          "disposable": false,
+          "checks": {
+            "regex": true,
+            "typo": true,
+            "disposable": true,
+            "mx": true
+          }
+        }
+      },
+      "rinse": {
+        "duplicate": false,
+        "canonical": true
+      }
+    },
+    {
+      "id": "_RstQqYXCQEB5SjGoTCKw",
+      "raw": {
+        "name": "Jo Presenter",
+        "outlet": "BBC 6 Music",
+        "email": "JO@bbc.co.uk",
+        "role": "presenter"
+      },
+      "phases": [
+        "scrub",
+        "rinse"
+      ],
+      "timestamp": "2026-11-11T16:37:01.999Z",
+      "scrub": {
+        "email": {
+          "valid": true,
+          "normalised": "jo@bbc.co.uk",
+          "confidence": "medium",
+          "catchAll": true,
+          "disposable": false,
+          "checks": {
+            "regex": true,
+            "typo": true,
+            "disposable": true,
+            "mx": true
+          }
+        }
+      },
+      "rinse": {
+        "duplicate": true,
+        "mergedWith": "jo@bbc.co.uk",
+        "matchType": "exact-email",
+        "matchConfidence": 1,
+        "canonical": false
+      }
+    },
+    {
+      "id": "CvJT8wWZ83N4B6lVv_I30",
+      "raw": {
+        "name": "Sam Writer",
+        "outlet": "The Quietus",
+        "email": "sam@gmial.com",
+        "role": "journalist"
+      },
+      "phases": [
+        "scrub",
+        "rinse"
+      ],
+      "timestamp": "2026-11-11T16:37:01.999Z",
+      "scrub": {
+        "email": {
+          "valid": true,
+          "normalised": "sam@gmail.com",
+          "confidence": "medium",
+          "corrected": true,
+          "original": "sam@gmial.com",
+          "suggested": "sam@gmail.com",
+          "catchAll": true,
+          "disposable": false,
+          "checks": {
+            "regex": true,
+            "typo": false,
+            "disposable": true,
+            "mx": true
+          }
+        }
+      },
+      "rinse": {
+        "duplicate": false,
+        "canonical": true
+      }
+    },
+    {
+      "id": "_JkaB3x2jLRK_FTAvu-om",
+      "raw": {
+        "name": "Bad Row",
+        "outlet": "Nowhere",
+        "email": "not-an-email"
+      },
+      "phases": [
+        "scrub",
+        "rinse"
+      ],
+      "timestamp": "2026-11-11T16:37:01.999Z",
+      "scrub": {
+        "email": {
+          "valid": false,
+          "normalised": "not-an-email",
+          "reason": "invalid_format",
+          "confidence": "none"
+        }
+      },
+      "rinse": {
+        "duplicate": false,
+        "canonical": true
+      }
+    },
+    {
+      "id": "zmBu5C1vvZCIYT5rdmy3K",
+      "raw": {
+        "name": "Ali Curator",
+        "outlet": "Amazing Radio",
+        "email": "ali@amazingradio.com",
+        "role": "producer",
+        "notes": "Says \"hi\" to everyone"
+      },
+      "phases": [
+        "scrub",
+        "rinse"
+      ],
+      "timestamp": "2026-11-11T16:37:01.999Z",
+      "scrub": {
+        "email": {
+          "valid": true,
+          "normalised": "ali@amazingradio.com",
+          "confidence": "high",
+          "disposable": false,
+          "checks": {
+            "regex": true,
+            "typo": true,
+            "disposable": true,
+            "mx": true
+          }
+        }
+      },
+      "rinse": {
+        "duplicate": false,
+        "canonical": true
+      }
+    }
+  ]
+}

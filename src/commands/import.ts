@@ -1,510 +1,230 @@
 /**
- * Import command -- sink-cli integration + CSV/JSON import.
+ * Import command: contacts from sink (datasink), CSV or JSON into TAP.
  *
  * Usage:
- *   sink wash contacts.csv --json | tap import --stdin
- *   tap import enriched.json
  *   tap import contacts.csv
- *   tap import enriched.jsonl
+ *   sink wash contacts.csv --json -q | tap import - --yes
+ *   tap import washed.json --campaign <campaign-id>
+ *   tap import contacts.csv --wash          (runs `sink wash` first, if installed)
  */
 
 import { Command } from "commander";
 import chalk from "chalk";
 import * as prompts from "@clack/prompts";
 import { readFileSync } from "node:fs";
-import { getClient, resolveWorkspaceId, hasApiKey } from "../auth.js";
-import { restRequest } from "../lib/rest.js";
+import { spawnSync } from "node:child_process";
+import { fetchAllPages, restRequest } from "../lib/rest.js";
+import { parseImport, type ContactPayload, type ParsedImport } from "../lib/contact-import.js";
 import * as out from "../output.js";
-import { COLOUR } from "../ui/theme.js";
-import { createRailSpinner, stepComplete, blank, summaryBar } from "../ui/format.js";
-import { sectionHeader, navHint } from "../ui/detail.js";
+import { createRailSpinner, blank, stepComplete, summaryBar } from "../ui/format.js";
+import { navHint } from "../ui/detail.js";
 import { handleError } from "../ui/errors.js";
-import {
-  type TapContactInsert,
-  mapSinkRecordToContact,
-  filterImportable,
-  detectSinkFormat,
-  extractSinkRecords,
-} from "../lib/sink-mapper.js";
 
-interface PlainContact {
-  name?: string;
-  email?: string;
-  outlet?: string;
-  role?: string;
-  [key: string]: unknown;
+/** POST /api/v1/contacts refuses more than 500 contacts per request. */
+const IMPORT_BATCH = 500;
+/** POST /api/v1/campaigns/:id/contacts refuses more than 200 ids per request. */
+const LINK_BATCH = 200;
+
+interface ImportOptions {
+  stdin?: boolean;
+  wash?: boolean;
+  yes?: boolean;
+  dryRun?: boolean;
+  campaign?: string;
+  enrich?: boolean;
+  json?: boolean;
 }
 
-/**
- * Parse CSV text into plain objects.
- * Simple parser -- handles quoted fields but not escaped quotes within quotes.
- */
-function parseCsv(text: string): PlainContact[] {
-  const lines = text.split("\n").filter((l) => l.trim());
-  if (lines.length < 2) return [];
+interface ImportTotals {
+  imported: number;
+  skipped: number;
+  invalid: number;
+  duplicatesInRequest: number;
+}
 
-  const headers = lines[0].split(",").map((h) => h.trim().toLowerCase().replace(/['"]/g, ""));
+interface LinkTotals {
+  added: number;
+  already_linked: number;
+  not_found: number;
+}
 
-  return lines.slice(1).map((line) => {
-    const values: string[] = [];
-    let current = "";
-    let inQuotes = false;
+function chunks<T>(items: T[], size: number): T[][] {
+  return Array.from({ length: Math.ceil(items.length / size) }, (_, i) => items.slice(i * size, (i + 1) * size));
+}
 
-    for (const char of line) {
-      if (char === '"') {
-        inQuotes = !inQuotes;
-      } else if (char === "," && !inQuotes) {
-        values.push(current.trim());
-        current = "";
-      } else {
-        current += char;
-      }
-    }
-    values.push(current.trim());
-
-    const obj: PlainContact = {};
-    for (let i = 0; i < headers.length; i++) {
-      if (values[i]) obj[headers[i]] = values[i].replace(/^['"]|['"]$/g, "");
-    }
-    return obj;
+function readStdin(): Promise<string> {
+  if (process.stdin.isTTY) {
+    return Promise.reject(new Error("Nothing piped to stdin. Pass a file, or pipe sink's output: sink wash contacts.csv --json -q | tap import - --yes"));
+  }
+  return new Promise((resolve, reject) => {
+    const parts: Buffer[] = [];
+    process.stdin.on("data", (chunk) => parts.push(chunk));
+    process.stdin.on("end", () => resolve(Buffer.concat(parts).toString("utf-8")));
+    process.stdin.on("error", reject);
   });
 }
 
-const EMPTY_ENRICHMENT_FIELDS = {
-  platform_type: null,
-  genres: null,
-  coverage_area: null,
-  coverage_areas: null,
-  geographic_scope: null,
-  best_timing: null,
-  submission_guidelines: null,
-  pitch_tips: null,
-  enrichment_confidence: null,
-  contact_method: null,
-  enriched: false,
-  enriched_at: null,
-  enrichment_source: null,
-} as const;
+/** Run `sink wash` on the input and hand back its JSON. sink reads stdin when given "-". */
+function washWithSink(file: string): string {
+  const res = spawnSync("sink", ["wash", file, "--json", "-q"], {
+    encoding: "utf-8",
+    maxBuffer: 512 * 1024 * 1024,
+    stdio: ["inherit", "pipe", "inherit"],
+  });
+  if ((res.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
+    throw new Error(
+      "--wash needs sink on your PATH (npm i -g datasink). Or pipe it: npx -y datasink wash contacts.csv --json -q | tap import - --yes",
+    );
+  }
+  if (res.status !== 0) throw new Error(`sink wash exited with code ${res.status}`);
+  return res.stdout;
+}
+
+function readInput(file: string, opts: ImportOptions): Promise<string> {
+  if (opts.wash) return Promise.resolve(washWithSink(file));
+  if (file === "-") return readStdin();
+  return Promise.resolve(readFileSync(file, "utf-8"));
+}
+
+async function importBatches(contacts: ContactPayload[]): Promise<ImportTotals> {
+  const totals: ImportTotals = { imported: 0, skipped: 0, invalid: 0, duplicatesInRequest: 0 };
+  for (const batch of chunks(contacts, IMPORT_BATCH)) {
+    const res = await restRequest<ImportTotals>("/api/v1/contacts", { method: "POST", body: { contacts: batch } });
+    totals.imported += res.imported ?? 0;
+    totals.skipped += res.skipped ?? 0;
+    totals.invalid += res.invalid ?? 0;
+    totals.duplicatesInRequest += res.duplicatesInRequest ?? 0;
+  }
+  return totals;
+}
 
 /**
- * Map plain JSON/CSV contact to TAP insert format.
+ * Link every contact in the file to the campaign, new or already in TAP.
+ * The import response lists at most 100 results and no ids, so ids come from
+ * the workspace's contact list, matched by email.
  */
-function mapPlainContact(
-  c: PlainContact,
-): { email: string; name: string | null; outlet: string | null; role: string | null } | null {
-  const email = (c.email || c.Email || c["email address"] || c["e-mail"]) as string | undefined;
-  if (!email || !email.includes("@")) return null;
+async function linkToCampaign(campaignId: string, contacts: ContactPayload[]): Promise<LinkTotals> {
+  const rows = await fetchAllPages<{ id: string; email: string }>("/api/v1/contacts", "contacts");
+  const idByEmail = new Map(rows.map((r) => [r.email.toLowerCase(), r.id]));
+  const ids = contacts.map((c) => idByEmail.get(c.email)).filter((id): id is string => Boolean(id));
+  const totals: LinkTotals = { added: 0, already_linked: 0, not_found: contacts.length - ids.length };
+  for (const batch of chunks(ids, LINK_BATCH)) {
+    const res = await restRequest<{ added: number; already_linked: number }>(
+      `/api/v1/campaigns/${encodeURIComponent(campaignId)}/contacts`,
+      { method: "POST", body: { contact_ids: batch } },
+    );
+    totals.added += res.added ?? 0;
+    totals.already_linked += res.already_linked ?? 0;
+  }
+  return totals;
+}
 
-  return {
-    email: email.toLowerCase().trim(),
-    name: (c.name || c.Name || c["full name"] || c["contact name"] || null) as string | null,
-    outlet: (c.outlet || c.Outlet || c.station || c.Station || c.publication || null) as string | null,
-    role: (c.role || c.Role || c.title || c.Title || null) as string | null,
-  };
+function reportParse(parsed: ParsedImport, source: string): void {
+  stepComplete("Read", `${parsed.total} rows from ${source} (${parsed.format})`);
+  const skipped = [
+    parsed.skippedDuplicate > 0 ? `${parsed.skippedDuplicate} duplicate` : "",
+    parsed.skippedInvalid > 0 ? `${parsed.skippedInvalid} without a valid email` : "",
+  ].filter(Boolean);
+  if (skipped.length > 0) stepComplete("Skipped", skipped.join(", "));
+  if (parsed.dropped.length > 0) {
+    out.warn(`TAP does not store ${parsed.dropped.join(", ")}. Those values stay in your file.`);
+  }
+}
+
+async function confirmImport(count: number, opts: ImportOptions, fromStdin: boolean): Promise<boolean> {
+  if (opts.yes) return true;
+  if (fromStdin) {
+    out.error("Add --yes when piping into tap import, since the prompt cannot read a piped stdin.");
+    process.exit(1);
+  }
+  const confirmed = await prompts.confirm({ message: `Import ${count} contacts into TAP?` });
+  return !prompts.isCancel(confirmed) && confirmed === true;
+}
+
+function reportDone(parsed: ParsedImport, totals: ImportTotals, linked: LinkTotals | null, opts: ImportOptions): void {
+  if (opts.json) {
+    const { contacts, ...input } = parsed;
+    out.json({ input: { ...input, contacts: contacts.length }, ...totals, campaign: linked });
+    return;
+  }
+  if (linked) {
+    const missing = linked.not_found > 0 ? `, ${linked.not_found} not found in TAP` : "";
+    stepComplete("Linked", `${linked.added} added to the campaign, ${linked.already_linked} already on it${missing}`);
+  }
+  blank();
+  summaryBar([
+    `${totals.imported} imported`,
+    `${totals.skipped} already in TAP`,
+    `${totals.invalid + totals.duplicatesInRequest} rejected`,
+  ]);
+  navHint(opts.campaign ? [`tap campaigns show ${opts.campaign}`] : ["tap contacts list"]);
+  blank();
+}
+
+function sourceLabel(source: string, opts: ImportOptions): string {
+  if (opts.wash) return `sink wash ${source}`;
+  return source === "-" ? "stdin" : source;
+}
+
+/** Send the contacts, then link them to the campaign when asked. Rails stay off stdout under --json. */
+async function sendToTap(contacts: ContactPayload[], opts: ImportOptions) {
+  const rail = opts.json ? null : createRailSpinner(`Importing ${contacts.length} contacts`).start();
+  const totals = await importBatches(contacts);
+  rail?.succeed("Imported", `${totals.imported} new, ${totals.skipped} already in TAP`);
+  if (!opts.campaign) return { totals, linked: null };
+
+  const linkRail = opts.json ? null : createRailSpinner("Linking to the campaign").start();
+  const linked = await linkToCampaign(opts.campaign, contacts);
+  linkRail?.stop();
+  return { totals, linked };
+}
+
+async function runImport(file: string | undefined, opts: ImportOptions): Promise<void> {
+  const source = opts.stdin || !file ? "-" : file;
+  const parsed = parseImport(await readInput(source, opts));
+  if (!opts.json) reportParse(parsed, sourceLabel(source, opts));
+
+  if (parsed.contacts.length === 0) {
+    out.error("No contacts with a valid email in the input");
+    process.exit(1);
+  }
+  if (opts.dryRun) {
+    out.info(`Dry run: would send ${parsed.contacts.length} contacts to TAP in ${chunks(parsed.contacts, IMPORT_BATCH).length} request(s)`);
+    return;
+  }
+  if (!(await confirmImport(parsed.contacts.length, opts, source === "-" && !opts.wash))) {
+    console.log(chalk.dim("  Cancelled."));
+    return;
+  }
+
+  const { totals, linked } = await sendToTap(parsed.contacts, opts);
+  if (opts.enrich) out.warn("--enrich is not wired up yet. Run `tap contacts enrich <id>` per contact.");
+  reportDone(parsed, totals, linked, opts);
 }
 
 export function importCommand(): Command {
   return new Command("import")
-    .description("Import contacts from sink-cli, CSV, or JSON")
-    .argument("[file]", "File path (CSV, JSON, or JSONL)")
-    .option("--stdin", "Read from stdin (for piping from sink)")
-    .option("--yes", "Skip confirmation")
-    .option("--dry-run", "Preview without importing")
-    .option("--campaign <id>", "Also add imported contacts to a campaign")
-    .option("--enrich", "Queue unenriched contacts for enrichment")
-    .option("-w, --workspace <id>", "Workspace ID")
+    .description("Import contacts from sink, CSV or JSON (use - to read stdin)")
+    .argument("[file]", "CSV, JSON or JSONL file, or - for stdin")
+    .option("--stdin", "Read from stdin (same as passing -)")
+    .option("--wash", "Run `sink wash` on the file first (needs sink on your PATH)")
+    .option("--yes", "Skip confirmation (required when piping)")
+    .option("--dry-run", "Show what would be imported without calling TAP")
+    .option("--campaign <id>", "Also add every contact in the file to this campaign")
+    .option("--enrich", "Queue unenriched contacts for enrichment (not wired up yet)")
     .option("--json", "Structured output")
-    .action(async (file, opts) => {
-      if (!file && !opts.stdin) {
-        out.error(
-          "Provide a file path or use --stdin.\n  Example: tap import contacts.csv\n  Example: sink wash data.csv --json | tap import --stdin",
-        );
-        process.exit(1);
-      }
-
-      const readRail = createRailSpinner("Reading input").start();
-
+    .addHelpText("after", `
+Examples:
+  tap import contacts.csv
+  sink wash contacts.csv --json -q | tap import - --yes
+  sink drain washed.json --format csv -o clean.csv && tap import clean.csv
+  tap import contacts.csv --wash --campaign <campaign-id>`)
+    .action(async (file: string | undefined, opts: ImportOptions) => {
       try {
-        const supabase = getClient();
-        const wsId = await resolveWorkspaceId(supabase, opts.workspace);
-
-        // Read input
-        let rawText: string;
-        if (opts.stdin) {
-          rawText = await readStdin();
-        } else {
-          rawText = readFileSync(file, "utf-8");
-        }
-
-        readRail.succeed(`Reading input            ${opts.stdin ? "stdin" : file}`);
-
-        // Parse
-        const parseRail = createRailSpinner("Parsing").start();
-
-        const contacts: TapContactInsert[] = [];
-        let sourceLabel = "";
-        let totalRecords = 0;
-        let skippedDuplicate = 0;
-        let skippedInvalid = 0;
-        let withEnrichment = 0;
-
-        // Try parsing as JSON first
-        let parsed: unknown = null;
-        try {
-          parsed = JSON.parse(rawText);
-        } catch {
-          // Not JSON -- try JSONL
-          const jsonlLines = rawText
-            .split("\n")
-            .filter((l) => l.trim())
-            .map((l) => {
-              try {
-                return JSON.parse(l);
-              } catch {
-                return null;
-              }
-            })
-            .filter(Boolean);
-
-          if (jsonlLines.length > 0) {
-            parsed = jsonlLines;
-          }
-        }
-
-        if (parsed) {
-          const sinkFormat = detectSinkFormat(parsed);
-
-          if (sinkFormat !== "unknown") {
-            sourceLabel = `sink format`;
-            const records = extractSinkRecords(parsed, sinkFormat);
-            totalRecords = records.length;
-
-            const { valid, skippedDuplicate: dup, skippedInvalid: inv } =
-              filterImportable(records);
-            skippedDuplicate = dup;
-            skippedInvalid = inv;
-
-            for (const record of valid) {
-              const mapped = mapSinkRecordToContact(record);
-              if (mapped) {
-                contacts.push(mapped);
-                if (mapped.enriched) withEnrichment++;
-              }
-            }
-          } else if (Array.isArray(parsed)) {
-            sourceLabel = `JSON`;
-            totalRecords = parsed.length;
-
-            for (const item of parsed as PlainContact[]) {
-              const mapped = mapPlainContact(item);
-              if (mapped) {
-                contacts.push({ ...mapped, ...EMPTY_ENRICHMENT_FIELDS });
-              } else {
-                skippedInvalid++;
-              }
-            }
-          }
-        } else {
-          sourceLabel = `CSV`;
-          const rows = parseCsv(rawText);
-          totalRecords = rows.length;
-
-          for (const row of rows) {
-            const mapped = mapPlainContact(row);
-            if (mapped) {
-              contacts.push({ ...mapped, ...EMPTY_ENRICHMENT_FIELDS });
-            } else {
-              skippedInvalid++;
-            }
-          }
-        }
-
-        if (contacts.length === 0) {
-          parseRail.fail("No valid contacts found in input");
-          process.exit(1);
-        }
-
-        parseRail.succeed(`Parsing                  ${totalRecords} records (${sourceLabel})`);
-
-        if (hasApiKey()) {
-          const payloadContacts = contacts.map(c => ({
-            name: c.name,
-            email: c.email,
-            outlet: c.outlet,
-            role: c.role,
-            genres: c.genres,
-            platform_type: c.platform_type,
-            bbc_station: (c as any).bbc_station,
-          }));
-
-          if (opts.dryRun) {
-            out.info(`Dry run -- would import ${payloadContacts.length} contacts`);
-            return;
-          }
-
-          // Confirmation
-          if (!opts.yes) {
-            const confirmed = await prompts.confirm({
-              message: `Import ${payloadContacts.length} contacts?`,
-            });
-            if (prompts.isCancel(confirmed) || !confirmed) {
-              console.log(chalk.dim("  Cancelled."));
-              return;
-            }
-          }
-
-          const importRail = createRailSpinner(`Importing ${payloadContacts.length} contacts`).start();
-
-          const res = await restRequest<{
-            imported: number;
-            results: Array<{ email: string; status: string; reason?: string }>;
-          }>("/api/v1/contacts", {
-            method: "POST",
-            body: {
-              contacts: payloadContacts,
-            },
-          });
-
-          importRail.succeed(`Imported                ${res.imported} contacts`);
-
-          const skipped = res.results.filter(r => r.status === 'skipped');
-          if (skipped.length > 0) {
-            out.warn(`${skipped.length} duplicate or invalid contacts skipped`);
-          }
-
-          if (opts.campaign && res.imported > 0) {
-            const searchEmails = payloadContacts.map(c => c.email);
-            const contactsRes = await restRequest<{ contacts: any[] }>("/api/v1/contacts", {
-              query: { limit: 100 },
-            });
-            const importedIds = contactsRes.contacts
-              .filter(c => searchEmails.includes(c.email))
-              .map(c => c.id);
-
-            if (importedIds.length > 0) {
-              const linkRail = createRailSpinner(`Linking to campaign`).start();
-              await restRequest(`/api/v1/campaigns/${encodeURIComponent(opts.campaign)}/contacts`, {
-                method: "POST",
-                body: {
-                  contact_ids: importedIds,
-                },
-              });
-              linkRail.succeed(`Linked contacts to campaign`);
-            }
-          }
-
-          if (opts.enrich) {
-            out.warn("Forcing enrichment queueing is not supported in REST mode.");
-          }
-
-          if (opts.json) {
-            out.json(res);
-            return;
-          }
-
-          blank();
-          summaryBar([`${res.imported} imported`, `${skipped.length} skipped`]);
-          navHint(["tap queue"]);
-          blank();
-          return;
-        }
-
-        // Deduplicate against workspace
-        const dedupRail = createRailSpinner("Deduplicating").start();
-
-        const emails = contacts.map((c) => c.email);
-        const { data: existing } = await supabase
-          .from("tap_contacts")
-          .select("email")
-          .eq("workspace_id", wsId)
-          .in("email", emails);
-
-        const existingEmails = new Set((existing || []).map((c) => c.email));
-        const newContacts = contacts.filter((c) => !existingEmails.has(c.email));
-        const alreadyInTap = contacts.length - newContacts.length;
-
-        dedupRail.succeed(
-          `Deduplicating            ${newContacts.length} new, ${alreadyInTap} existing`,
-        );
-
-        // Summary
-        blank();
-        sectionHeader("Import Preview");
-        console.log(`  ${"Valid emails".padEnd(18)}${contacts.length}`);
-        if (skippedInvalid > 0) {
-          console.log(`  ${"Invalid".padEnd(18)}${chalk.hex(COLOUR.warning)(`${skippedInvalid} skipped`)}`);
-        }
-        if (skippedDuplicate > 0) {
-          console.log(`  ${"Duplicates".padEnd(18)}${chalk.hex(COLOUR.warning)(`${skippedDuplicate} skipped`)}`);
-        }
-        if (alreadyInTap > 0) {
-          console.log(`  ${"Already in TAP".padEnd(18)}${chalk.hex(COLOUR.warning)(`${alreadyInTap} skipped`)}`);
-        }
-        console.log(`  ${"New contacts".padEnd(18)}${chalk.hex(COLOUR.success)(String(newContacts.length))}`);
-        if (withEnrichment > 0) {
-          console.log(`  ${"With enrichment".padEnd(18)}${chalk.hex(COLOUR.primary)(`${withEnrichment} from sink`)}`);
-        }
-        blank();
-
-        if (opts.json && opts.dryRun) {
-          out.json({
-            dryRun: true,
-            source: sourceLabel,
-            totalRecords,
-            validEmails: contacts.length,
-            skippedInvalid,
-            skippedDuplicate,
-            alreadyInTap,
-            newContacts: newContacts.length,
-            withEnrichment,
-          });
-          return;
-        }
-
-        if (newContacts.length === 0) {
-          out.info("All contacts already exist in TAP");
-          return;
-        }
-
-        if (opts.dryRun) {
-          out.info("Dry run -- nothing imported");
-          return;
-        }
-
-        // Confirmation
-        if (!opts.yes) {
-          const confirmed = await prompts.confirm({
-            message: `Import ${newContacts.length} contacts?`,
-          });
-          if (prompts.isCancel(confirmed) || !confirmed) {
-            console.log(chalk.dim("  Cancelled."));
-            return;
-          }
-        }
-
-        // Batch insert with progress
-        const importRail = createRailSpinner(
-          `Importing ${newContacts.length} contacts`,
-        ).start();
-
-        const CHUNK_SIZE = 100;
-        let imported = 0;
-        let errors = 0;
-
-        for (let i = 0; i < newContacts.length; i += CHUNK_SIZE) {
-          const chunk = newContacts.slice(i, i + CHUNK_SIZE);
-          const rows = chunk.map((c) => ({
-            workspace_id: wsId,
-            ...c,
-            source: c.enrichment_source === "sink" ? "sink-import" : "cli-import",
-            pipeline_status: "new" as const,
-          }));
-
-          const { error } = await supabase
-            .from("tap_contacts")
-            .upsert(rows, { onConflict: "workspace_id,email", ignoreDuplicates: true });
-
-          if (error) {
-            errors++;
-          } else {
-            imported += chunk.length;
-          }
-        }
-
-        importRail.succeed(`Importing                ${imported} contacts`);
-
-        // Add to campaign if specified
-        if (opts.campaign && imported > 0) {
-          const importedEmails = newContacts.map((c) => c.email);
-          const { data: importedContacts } = await supabase
-            .from("tap_contacts")
-            .select("id")
-            .eq("workspace_id", wsId)
-            .in("email", importedEmails);
-
-          if (importedContacts && importedContacts.length > 0) {
-            const campaignLinks = importedContacts.map((c) => ({
-              project_id: opts.campaign,
-              contact_id: c.id,
-              pitch_status: "not_pitched",
-            }));
-
-            await supabase
-              .from("campaign_contacts")
-              .upsert(campaignLinks, {
-                onConflict: "project_id,contact_id",
-                ignoreDuplicates: true,
-              });
-          }
-
-          stepComplete(`Campaign                 ${opts.campaign.slice(0, 8)}`);
-        }
-
-        // Queue for enrichment
-        if (opts.enrich && imported > 0) {
-          const unenrichedEmails = newContacts
-            .filter((c) => !c.enriched)
-            .map((c) => c.email);
-
-          if (unenrichedEmails.length > 0) {
-            await supabase
-              .from("tap_contacts")
-              .update({ enrichment_source: "queued" })
-              .eq("workspace_id", wsId)
-              .in("email", unenrichedEmails)
-              .is("enriched_at", null);
-
-            stepComplete(`Enrichment queued        ${unenrichedEmails.length} contacts`);
-          }
-        }
-
-        if (errors > 0) {
-          out.warn(`${errors} batch${errors > 1 ? "es" : ""} had errors`);
-        }
-
-        if (opts.json) {
-          out.json({
-            imported,
-            withEnrichment: newContacts.filter((c) => c.enriched).length,
-            errors,
-          });
-        }
-
-        // Summary
-        const summaryParts: string[] = [];
-        summaryParts.push(`${imported} imported`);
-        if (errors > 0) summaryParts.push(chalk.hex(COLOUR.danger)(`${errors} errors`));
-        if (newContacts.filter((c) => c.enriched).length > 0) {
-          summaryParts.push(`${newContacts.filter((c) => c.enriched).length} enriched`);
-        }
-        blank();
-        summaryBar(summaryParts);
-
-        navHint([
-          "tap contacts list --sort last-contacted",
-          "tap queue",
-        ]);
-        blank();
+        await runImport(file, opts);
       } catch (err) {
         handleError(err);
         process.exit(1);
       }
     });
-}
-
-/**
- * Read all data from stdin.
- */
-function readStdin(): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    process.stdin.on("data", (chunk) => chunks.push(chunk));
-    process.stdin.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
-    process.stdin.on("error", reject);
-
-    // If stdin is a TTY (no pipe), reject quickly
-    if (process.stdin.isTTY) {
-      reject(new Error("No data piped to stdin. Use a file path or pipe data."));
-    }
-  });
 }

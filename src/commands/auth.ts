@@ -1,74 +1,64 @@
 /**
- * Auth commands for the TAP CLI.
- *
- * Two flows:
- *   - `tap auth login --api-key`        (REST v1, preferred — default)
- *   - `tap auth login --legacy`         (deprecated direct-Supabase)
- *
- * Legacy direct-Supabase mode still works during the 30-day deprecation
- * window (removed 14 June 2026). A stderr warning prints whenever a
- * command falls back to it.
+ * Auth commands for the TAP CLI. `tap auth login` stores a REST v1
+ * `tap_ak_*` key after verifying it against TAP.
  */
 
 import { Command } from "commander";
 import * as clack from "@clack/prompts";
-import { saveConfig, loadConfig, hasApiKey } from "../auth.js";
+import { saveConfig, loadConfig, fileApiKey, CONFIG_FILE } from "../auth.js";
 import { verifyApiKey } from "../lib/rest.js";
 import { checkApiKeyFormat } from "../lib/key-validation.js";
 import { openUrl } from "../lib/browser.js";
 import * as out from "../output.js";
 
-const REST_DEPRECATION_DATE = "14 June 2026";
 const API_KEYS_URL = "https://totalaudiopromo.com/settings/api-keys";
+
+/**
+ * The scopes each command needs, from the hasScope checks in the v1 routes it
+ * calls. Outcomes are logged and read under campaigns:*; the outreach queue
+ * that `tap send` reads needs pitches:read.
+ */
+const COMMAND_SCOPES: Array<[string, string]> = [
+  ["campaigns:read", "campaigns, send, pitch, contacts show"],
+  ["campaigns:write", "campaigns create/status, outcome, import --campaign"],
+  ["contacts:read contacts:write", "contacts, import, open"],
+  ["pitches:read", "send"],
+  ["pitches:write", "pitch"],
+  ["actions:read", "queue"],
+  ["skills:read skills:write", "skill"],
+  ["enrich", "contacts enrich (spends enrichments)"],
+];
+
+function keySourceLabel(source: "env" | "file" | undefined): string {
+  return source === "env" ? "(from TAP_API_KEY)" : `(from ${CONFIG_FILE})`;
+}
 
 export function authCommand(): Command {
   const cmd = new Command("auth").description("Manage authentication");
 
   cmd
     .command("login")
-    .description(
-      "Store TAP credentials. Default flow asks for a tap_ak_* key; pass --legacy for the deprecated direct-Supabase flow.",
-    )
-    .option("--api-key", "Force the REST v1 (tap_ak_*) flow (default)")
-    .option(
-      "--legacy",
-      "Use the deprecated direct-Supabase flow (removed 14 June 2026)",
-    )
-    .action(async (opts: { apiKey?: boolean; legacy?: boolean }) => {
-      const useLegacy = Boolean(opts.legacy) && !opts.apiKey;
-      if (useLegacy) {
-        await runLegacyLogin();
-      } else {
-        await runRestLogin();
-      }
-    });
+    .description("Store a TAP API key (tap_ak_*)")
+    .option("--api-key", "Accepted for compatibility; the API key flow is the only flow")
+    .action(runRestLogin);
 
   cmd
     .command("status")
     .description("Check authentication status")
     .action(() => {
       const config = loadConfig();
-      if (!config) {
+      if (!config?.apiKey) {
         out.warn(
           'Not authenticated. Run "tap auth login" or set TAP_API_KEY in your environment.',
         );
         return;
       }
-      const rest = hasApiKey();
-      out.success(rest ? "Authenticated (REST v1)" : "Authenticated (legacy)");
-      if (rest) {
-        out.info(`API key:  ${(config.apiKey ?? "").slice(0, 15)}...`);
-        out.info(
-          `Base URL: ${config.tapUrl ?? "https://totalaudiopromo.com"}`,
-        );
-      } else if (config.supabaseUrl && config.supabaseKey) {
-        out.info(`Supabase URL: ${config.supabaseUrl}`);
-        out.info(`Supabase key: ${config.supabaseKey.slice(0, 10)}...`);
-        out.warn(
-          `Legacy mode is deprecated. Migrate before ${REST_DEPRECATION_DATE} with \`tap auth login\`.`,
-        );
+      out.success("Authenticated (REST v1)");
+      out.info(`API key:  ${config.apiKey.slice(0, 15)}...  ${keySourceLabel(config.apiKeySource)}`);
+      if (config.apiKeySource === "env" && fileApiKey()) {
+        out.warn(`TAP_API_KEY overrides the key saved in ${CONFIG_FILE}.`);
       }
-      if (config.workspaceId) out.info(`Workspace: ${config.workspaceId}`);
+      out.info(`Base URL: ${config.tapUrl ?? "https://totalaudiopromo.com"}${process.env.TAP_URL ? "  (from TAP_URL)" : ""}`);
     });
 
   return cmd;
@@ -80,10 +70,8 @@ async function runRestLogin(): Promise<void> {
     [
       "1. Sign in to https://totalaudiopromo.com",
       "2. Go to Settings → API Keys",
-      "3. Mint a key — choose the scopes you need:",
-      "   campaigns:read campaigns:write pitches:read pitches:write",
-      "   outcomes:read outcomes:write skills:read skills:write",
-      "   approvals:read webhooks:read webhooks:write enrich validate",
+      "3. Mint a key with the scopes for the commands you use:",
+      ...COMMAND_SCOPES.map(([scopes, commands]) => `   ${scopes.padEnd(34)}${commands}`),
       "4. Copy the key that starts with tap_ak_ and paste it below.",
     ].join("\n"),
     "Where to find your API key",
@@ -113,15 +101,6 @@ async function runRestLogin(): Promise<void> {
     process.exit(0);
   }
 
-  const workspaceId = await clack.text({
-    message: "Workspace ID (optional — auto-resolved if blank)",
-    placeholder: "Leave blank to auto-resolve",
-  });
-  if (clack.isCancel(workspaceId)) {
-    clack.cancel("Cancelled");
-    process.exit(0);
-  }
-
   const tapUrl = await clack.text({
     message: "TAP base URL (press Enter for https://totalaudiopromo.com)",
     placeholder: "https://totalaudiopromo.com",
@@ -146,13 +125,7 @@ async function runRestLogin(): Promise<void> {
       : "Key verified (no campaigns:read scope — some commands will need a broader key)",
   );
 
-  const existing = loadConfig() ?? {};
-  saveConfig({
-    ...existing,
-    apiKey: apiKey as string,
-    tapUrl: resolvedUrl,
-    workspaceId: (workspaceId as string) || existing.workspaceId,
-  });
+  saveConfig({ apiKey: apiKey as string, tapUrl: resolvedUrl });
 
   clack.outro(
     "Credentials saved to ~/.tap/config.json. Try `tap skill list` to confirm, then `tap mcp setup` to wire up an MCP client.",
@@ -162,65 +135,15 @@ async function runRestLogin(): Promise<void> {
 function reportVerifyFailure(
   result: Extract<Awaited<ReturnType<typeof verifyApiKey>>, { ok: false }>,
 ): void {
-  if (result.reason === "invalid-key") {
+  if (result.reason === "plan") {
+    clack.log.error(result.message);
+    clack.log.info("See https://totalaudiopromo.com/settings/billing.");
+  } else if (result.reason === "invalid-key") {
     clack.log.error("TAP rejected that key (401) — check you copied it in full.");
   } else if (result.reason === "network") {
     clack.log.error(`Could not reach TAP: ${result.message}`);
-    clack.log.info("Check your connection or --legacy if TAP REST is down.");
+    clack.log.info("Check your connection and try again.");
   } else {
     clack.log.error(result.message);
   }
-}
-
-async function runLegacyLogin(): Promise<void> {
-  clack.intro("TAP CLI — legacy direct-Supabase authentication");
-  clack.note(
-    [
-      `This path is deprecated and will be removed on ${REST_DEPRECATION_DATE}.`,
-      "Prefer `tap auth login` (REST v1) instead.",
-    ].join("\n"),
-    "Deprecation",
-  );
-
-  const supabaseUrl = await clack.text({
-    message: "Supabase URL",
-    placeholder: "https://your-project.supabase.co",
-    validate: (v) =>
-      !v.startsWith("https://") ? "Must be a valid HTTPS URL" : undefined,
-  });
-  if (clack.isCancel(supabaseUrl)) {
-    clack.cancel("Cancelled");
-    process.exit(0);
-  }
-
-  const supabaseKey = await clack.password({
-    message: "Supabase service role key",
-    validate: (v) =>
-      !v || v.length < 20 ? "Key looks too short" : undefined,
-  });
-  if (clack.isCancel(supabaseKey)) {
-    clack.cancel("Cancelled");
-    process.exit(0);
-  }
-
-  const workspaceId = await clack.text({
-    message: "Workspace ID (optional, press Enter to skip)",
-    placeholder: "Leave blank to auto-resolve",
-  });
-  if (clack.isCancel(workspaceId)) {
-    clack.cancel("Cancelled");
-    process.exit(0);
-  }
-
-  const existing = loadConfig() ?? {};
-  saveConfig({
-    ...existing,
-    supabaseUrl: supabaseUrl as string,
-    supabaseKey: supabaseKey as string,
-    workspaceId: (workspaceId as string) || existing.workspaceId,
-  });
-
-  clack.outro(
-    `Legacy credentials saved. Migrate to REST v1 before ${REST_DEPRECATION_DATE}.`,
-  );
 }

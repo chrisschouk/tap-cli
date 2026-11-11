@@ -1,21 +1,51 @@
 /**
  * Centralised error formatting.
  *
- * Transforms raw Node/Supabase errors into friendly terminal messages
+ * Transforms TAP API and Node errors into friendly terminal messages
  * with contextual hints for resolution.
  */
 
 import chalk from "chalk";
 import { GLYPH } from "./theme.js";
+import { TapApiError } from "../lib/rest.js";
 
 interface FormattedError {
   message: string;
   hint?: string;
 }
 
+/**
+ * Thrown in place of `process.exit` while interactive mode runs a command, so
+ * a failing command ends that command and not the session.
+ */
+export class CommandExit extends Error {
+  constructor(public readonly code: number) {
+    super(`exit ${code}`);
+    this.name = "CommandExit";
+  }
+}
+
+const API_STATUS_HINT: Record<number, string> = {
+  401: "Run `tap auth login` with a current tap_ak_ key.",
+  402: "The TAP API needs the year plan. See https://totalaudiopromo.com/settings/billing.",
+  404: "Check the ID and try again.",
+  429: "Rate limit reached. Wait a minute and try again.",
+};
+
+/** TAP answers a missing scope with "Insufficient scope: <scope> required". */
+function apiHint(err: TapApiError): string | undefined {
+  const scope = /Insufficient scope: (\S+) required/.exec(err.message)?.[1];
+  if (scope) return `Mint a key with ${scope} in Settings, API keys, then run \`tap auth login\`.`;
+  return API_STATUS_HINT[err.status];
+}
+
 function formatError(err: unknown): FormattedError {
   if (!(err instanceof Error)) {
     return { message: "Unknown error" };
+  }
+
+  if (err instanceof TapApiError) {
+    return { message: err.message, hint: apiHint(err) };
   }
 
   const msg = err.message;
@@ -63,7 +93,7 @@ function formatError(err: unknown): FormattedError {
   }
 
   // Auth errors
-  if (msg.includes("JWT") || msg.includes("401") || msg.includes("not authenticated")) {
+  if (msg.includes("401") || msg.includes("not authenticated")) {
     return {
       message: "Authentication failed",
       hint: "Run `tap auth login` to reconnect.",
@@ -77,26 +107,6 @@ function formatError(err: unknown): FormattedError {
     };
   }
 
-  // Supabase errors
-  if (msg.includes("23505") || msg.includes("duplicate key")) {
-    return {
-      message: "Already exists",
-      hint: "This record already exists in your workspace.",
-    };
-  }
-
-  if (msg.includes("PGRST")) {
-    return {
-      message: "Database error",
-      hint: msg,
-    };
-  }
-
-  // Gmail errors
-  if (msg.includes("Gmail") || msg.includes("gmail")) {
-    return { message: msg };
-  }
-
   // Default: just the message
   return { message: msg };
 }
@@ -105,6 +115,7 @@ function formatError(err: unknown): FormattedError {
  * Print a formatted error with optional hint line.
  */
 export function handleError(err: unknown): void {
+  if (err instanceof CommandExit) throw err;
   const { message, hint } = formatError(err);
   console.error(`  ${chalk.red(GLYPH.cross)} ${message}`);
   if (hint) {

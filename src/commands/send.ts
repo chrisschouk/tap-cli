@@ -1,314 +1,98 @@
 /**
- * Send command -- pitch-to-inbox pipeline from terminal.
+ * Send command -- shows the pitches for a campaign that still need the artist,
+ * and where to approve and send them in TAP.
+ *
+ * Approving and sending a pitch are human-only in TAP. This command never
+ * approves or sends; it lists what is waiting and links to the release's
+ * pitching tab, where the artist approves and TAP sends.
  *
  * Usage:
- *   tap send <pitch-id>              -- send a pitch draft via Gmail
- *   tap send <pitch-id> --dry-run    -- preview without sending
- *   tap send <pitch-id> --confirm    -- skip confirmation prompt
+ *   tap send <campaign-id>           -- list waiting pitches and print the TAP link
+ *   tap send <campaign-id> --open    -- also open the link in the browser
  */
 
 import { Command } from "commander";
 import chalk from "chalk";
-import * as prompts from "@clack/prompts";
-import { getClient, resolveWorkspaceId, hasApiKey } from "../auth.js";
-import * as out from "../output.js";
-import { warningBlock, navHint, campaignLabel } from "../ui/detail.js";
-import { createRailSpinner, stepComplete, blank, summaryBar } from "../ui/format.js";
-import { handleError } from "../ui/errors.js";
+import { restRequest } from "../lib/rest.js";
+import { dashboard } from "../lib/dashboard.js";
+import { openUrl } from "../lib/browser.js";
 import {
-  getGmailConnection,
-  ensureFreshToken,
-  buildRawMessage,
-  sendGmailMessage,
-  getDailySendCount,
-} from "../lib/gmail.js";
+  fetchPendingPitches,
+  PENDING_STATE_LABEL,
+  type PendingPitch,
+  type PendingState,
+} from "../lib/pending-pitches.js";
+import * as out from "../output.js";
+import { COLOUR } from "../ui/theme.js";
+import { campaignLabel, navHint, shortDate } from "../ui/detail.js";
+import { createRailSpinner, blank, summaryBar } from "../ui/format.js";
+import { handleError } from "../ui/errors.js";
 
-const DAILY_SEND_CAP = 50;
+interface CampaignRow {
+  id: string;
+  name: string;
+  artist_name: string | null;
+}
+
+const STATE_COLOUR: Record<PendingState, string> = {
+  draft: COLOUR.muted,
+  pending_approval: COLOUR.warning,
+  approved: COLOUR.success,
+  send_failed: COLOUR.danger,
+  held_for_payment: COLOUR.warning,
+};
+
+function renderPending(pitches: PendingPitch[]): void {
+  const rows = pitches.map((p) => [
+    out.truncate(p.subject, 40) || "",
+    chalk.hex(STATE_COLOUR[p.state])(PENDING_STATE_LABEL[p.state]),
+    shortDate(p.scheduledFor),
+  ]);
+  blank();
+  out.table(["Subject", "State", "Scheduled"], rows);
+}
 
 export function sendCommand(): Command {
   return new Command("send")
-    .description("Send a pitch draft via Gmail")
-    .argument("<pitch-id>", "Pitch draft ID")
-    .option("-w, --workspace <id>", "Workspace ID")
-    .option("--confirm", "Skip confirmation prompt")
-    .option("--dry-run", "Preview without sending")
-    .option("--json", "Structured output with message ID")
-    .action(async (pitchId, opts) => {
-      const rail = createRailSpinner("Loading pitch").start();
+    .description("List a campaign's pitches waiting for approval and link to where you approve and send them in TAP")
+    .argument("<campaign-id>", "Campaign ID")
+    .option("--open", "Open the approve-and-send page in your browser")
+    .option("--json", "Output as JSON")
+    .action(async (campaignId: string, opts: { open?: boolean; json?: boolean }) => {
+      const rail = createRailSpinner("Loading pitches").start();
 
       try {
-        if (hasApiKey()) {
-          rail.fail("Pitch sending is not supported in REST mode. Per PRODUCT_GUARDRAILS.md §1, sending pitches requires human approval inside the TAP workspace UI.");
-          process.exit(1);
-        }
+        const [{ campaign }, pending] = await Promise.all([
+          restRequest<{ campaign: CampaignRow }>(`/api/v1/campaigns/${encodeURIComponent(campaignId)}`),
+          fetchPendingPitches(campaignId),
+        ]);
+        const url = dashboard.approveAndSend(campaign.id);
 
-        const supabase = getClient();
-        const wsId = await resolveWorkspaceId(supabase, opts.workspace);
-
-        // Fetch pitch draft
-        const { data: pitch, error: pitchErr } = await supabase
-          .from("campaign_pitch_drafts")
-          .select(
-            "id, subject, body, campaign_id, contact_id, send_status, sent_at",
-          )
-          .eq("id", pitchId)
-          .single();
-
-        if (pitchErr || !pitch) {
-          rail.fail(pitchErr?.message || `Pitch not found: ${pitchId}`);
-          process.exit(1);
-        }
-
-        if (pitch.send_status === "sent") {
-          rail.fail(`Already sent on ${pitch.sent_at ? new Date(pitch.sent_at).toLocaleDateString("en-GB") : "unknown date"}`);
-          process.exit(1);
-        }
-
-        rail.succeed("Loading pitch");
-
-        // Resolve contact and campaign in parallel
-        const contactRail = createRailSpinner("Resolving contact").start();
-
-        const [contactResult, campaignResult, gmailConn, dailyCount] =
-          await Promise.all([
-            pitch.contact_id
-              ? supabase
-                  .from("tap_contacts")
-                  .select("id, name, email, outlet, last_contacted_at, total_pitches, cooling_off, pitch_embargo_until")
-                  .eq("id", pitch.contact_id)
-                  .single()
-              : Promise.resolve({ data: null, error: null }),
-            pitch.campaign_id
-              ? supabase
-                  .from("tap_projects")
-                  .select("id, name, artist_name")
-                  .eq("id", pitch.campaign_id)
-                  .single()
-              : Promise.resolve({ data: null, error: null }),
-            getGmailConnection(supabase, wsId),
-            getDailySendCount(supabase, wsId),
-          ]);
-
-        const contact = contactResult.data;
-        const campaign = campaignResult.data;
-
-        if (!contact?.email) {
-          contactRail.fail("No contact email associated with this pitch");
-          process.exit(1);
-        }
-
-        contactRail.succeed(`Resolving contact        ${contact.name || ""} <${contact.email}>`);
-
-        if (!gmailConn && !opts.dryRun) {
-          out.error(
-            "No Gmail connection. Connect in TAP: tap.totalaudiopromo.com/settings/integrations",
-          );
-          process.exit(1);
-        }
-
-        if (dailyCount >= DAILY_SEND_CAP && !opts.dryRun) {
-          out.error(
-            `Daily send limit reached (${dailyCount}/${DAILY_SEND_CAP}). Try again tomorrow.`,
-          );
-          process.exit(1);
-        }
-
-        stepComplete(`Checking Gmail           ${dailyCount}/${DAILY_SEND_CAP} daily cap`);
-
-        // Relationship warnings
-        const warnings: string[] = [];
-        if (contact.total_pitches && contact.total_pitches >= 3) {
-          const ninetyDaysAgo = new Date();
-          ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
-          const { count: recentPitches } = await supabase
-            .from("campaign_contacts")
-            .select("id", { count: "exact", head: true })
-            .eq("contact_id", contact.id)
-            .not("last_pitched_at", "is", null)
-            .gte("last_pitched_at", ninetyDaysAgo.toISOString());
-
-          if (recentPitches && recentPitches >= 3) {
-            warnings.push(
-              `${contact.name || contact.email} was pitched ${recentPitches} times in the last 90 days`,
-            );
-          }
-        }
-
-        if (contact.cooling_off) {
-          warnings.push(`${contact.name || contact.email} is in a cooling off period`);
-        }
-
-        if (contact.pitch_embargo_until) {
-          const embargo = new Date(contact.pitch_embargo_until);
-          if (embargo > new Date()) {
-            warnings.push(
-              `Pitch embargo until ${embargo.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}`,
-            );
-          }
-        }
-
-        // Check for recent declined outcome
-        const { data: recentDeclined } = await supabase
-          .from("tap_contact_outcomes")
-          .select("occurred_at")
-          .eq("contact_id", contact.id)
-          .eq("outcome_type", "declined")
-          .order("occurred_at", { ascending: false })
-          .limit(1);
-
-        if (recentDeclined && recentDeclined.length > 0) {
-          const declinedDate = new Date(recentDeclined[0].occurred_at);
-          const daysSince = Math.floor(
-            (Date.now() - declinedDate.getTime()) / 86400000,
-          );
-          if (daysSince <= 14) {
-            warnings.push(
-              `Last pitch was declined ${daysSince} day${daysSince === 1 ? "" : "s"} ago`,
-            );
-          }
-        }
-
-        if (warnings.length > 0) {
-          warningBlock(warnings);
-        }
-
-        // Preview
-        blank();
-        console.log(`  ${chalk.dim("To".padEnd(12))}${contact.name || ""} <${contact.email}>`);
-        console.log(`  ${chalk.dim("Subject".padEnd(12))}${pitch.subject}`);
-        if (campaign) {
-          console.log(`  ${chalk.dim("Campaign".padEnd(12))}${campaignLabel(campaign)}`);
-        }
-
-        blank();
-        console.log(`  ${chalk.dim("Preview:")}`);
-        const allBodyLines = pitch.body.split("\n");
-        for (const line of allBodyLines.slice(0, 5)) {
-          console.log(`  ${line}`);
-        }
-        if (allBodyLines.length > 5) {
-          console.log(chalk.dim(`  [truncated at 5 lines]`));
-        }
-        blank();
-
-        if (opts.dryRun) {
-          out.info("Dry run -- nothing sent");
-          if (opts.json) {
-            out.json({
-              dryRun: true,
-              to: contact.email,
-              subject: pitch.subject,
-              campaignId: pitch.campaign_id,
-              warnings,
-            });
-          }
+        if (opts.json) {
+          rail.stop();
+          out.json({ campaign_id: campaign.id, pitches: pending, approve_url: url });
           return;
         }
 
-        // Confirmation
-        if (!opts.confirm) {
-          const confirmed = await prompts.confirm({
-            message: "Send this pitch?",
-          });
-          if (prompts.isCancel(confirmed) || !confirmed) {
-            console.log(chalk.dim("  Cancelled."));
-            return;
-          }
-        }
+        rail.succeed("Loaded", `${campaignLabel(campaign)}, ${pending.length} pitches still need you`);
 
-        // Send
-        blank();
-        const sendRail = createRailSpinner("Sending via Gmail").start();
-
-        const accessToken = await ensureFreshToken(supabase, gmailConn!);
-        const rawMessage = buildRawMessage(
-          contact.email,
-          pitch.subject,
-          pitch.body,
-          gmailConn!.email_address,
-        );
-        const { messageId, threadId } = await sendGmailMessage(
-          accessToken,
-          rawMessage,
-        );
-
-        sendRail.succeed(`Sent via Gmail           msg: ${messageId}`);
-
-        // Update database
-        const now = new Date().toISOString();
-        await Promise.all([
-          supabase
-            .from("campaign_pitch_drafts")
-            .update({
-              send_status: "sent",
-              sent_at: now,
-              gmail_message_id: messageId,
-              gmail_thread_id: threadId,
-              sent_via: "cli",
-            })
-            .eq("id", pitchId),
-          pitch.contact_id && pitch.campaign_id
-            ? supabase
-                .from("campaign_contacts")
-                .update({
-                  pitch_status: "sent",
-                  last_pitched_at: now,
-                })
-                .eq("contact_id", pitch.contact_id)
-                .eq("project_id", pitch.campaign_id)
-            : Promise.resolve(),
-          pitch.contact_id
-            ? supabase
-                .from("tap_contacts")
-                .update({ last_contacted_at: now })
-                .eq("id", pitch.contact_id)
-            : Promise.resolve(),
-          supabase.from("gmail_send_logs").insert({
-            workspace_id: wsId,
-            user_id: gmailConn!.id,
-            campaign_id: pitch.campaign_id,
-            contact_id: pitch.contact_id,
-            pitch_id: pitchId,
-            recipient_email: contact.email,
-            subject: pitch.subject,
-            gmail_message_id: messageId,
-            gmail_thread_id: threadId,
-            sent_at: now,
-          }),
-        ]);
-
-        stepComplete("Status updated           sent");
-
-        // Calculate follow-up date
-        const followUp = new Date();
-        followUp.setDate(followUp.getDate() + 5);
-        stepComplete(
-          `Follow-up                ${followUp.toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`,
-        );
-
-        if (opts.json) {
-          out.json({
-            sent: true,
-            messageId,
-            threadId,
-            to: contact.email,
-            subject: pitch.subject,
-          });
+        if (pending.length === 0) {
+          out.info("Nothing is waiting for approval in this campaign");
+        } else {
+          renderPending(pending);
         }
 
         blank();
-        summaryBar([
-          "Sent",
-          `To: ${contact.email}`,
-          `Follow-up: ${followUp.toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`,
-        ]);
+        out.info("Approve and send in TAP. The CLI never sends a pitch.");
+        console.log(`  ${chalk.hex(COLOUR.primary)(url)}`);
+        if (opts.open) openUrl(url, (message) => out.error(`Failed to open browser: ${message}`));
 
-        navHint([
-          "tap queue",
-          `tap contacts history ${contact.id.slice(0, 8)}`,
-        ]);
+        blank();
+        summaryBar([`${pending.length} waiting`, campaignLabel(campaign)]);
+        navHint([`tap send ${campaignId} --open`, `tap campaigns show ${campaignId}`]);
         blank();
       } catch (err) {
+        rail.fail("Could not load pitches");
         handleError(err);
         process.exit(1);
       }

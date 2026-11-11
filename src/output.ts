@@ -20,27 +20,39 @@ import { stripAnsi, ansiPadEnd } from "./ui/detail.js";
  * Create a spinner that writes to stderr so it doesn't pollute --json output.
  */
 export function spinner(text: string): Ora {
-  return ora({ text, stream: process.stderr }).start();
+  return ora({ text, prefixText: " ", stream: process.stderr }).start();
+}
+
+/** Shrink the widest columns until the row fits the terminal, keeping each at least 6 wide. */
+function fitWidths(widths: number[], available: number): number[] {
+  const fitted = [...widths];
+  const gaps = 2 * (fitted.length - 1);
+  while (fitted.reduce((a, b) => a + b, 0) + gaps > available) {
+    const widest = fitted.indexOf(Math.max(...fitted));
+    if (fitted[widest] <= 6) break;
+    fitted[widest]--;
+  }
+  return fitted;
+}
+
+/** Plain cells are cut to fit with an ellipsis; coloured badges are short and left alone. */
+function fitCell(cell: string, width: number): string {
+  return stripAnsi(cell) === cell ? truncate(cell, width) : cell;
 }
 
 export function table(headers: string[], rows: string[][]): void {
-  // Calculate column widths using visible (ANSI-stripped) lengths
-  const widths = headers.map((h, i) => {
-    const maxRow = Math.max(...rows.map((r) => stripAnsi(r[i] || "").length));
-    return Math.max(h.length, maxRow);
-  });
+  const natural = headers.map((h, i) =>
+    Math.max(h.length, ...rows.map((r) => stripAnsi(r[i] || "").length)),
+  );
+  const widths = fitWidths(natural, (process.stdout.columns || 120) - 2);
 
-  // Print header
-  const headerLine = headers.map((h, i) => h.padEnd(widths[i])).join("  ");
+  const headerLine = headers.map((h, i) => truncate(h, widths[i]).padEnd(widths[i])).join("  ");
   console.log(`  ${chalk.bold(headerLine)}`);
   console.log(`  ${chalk.dim(GLYPH.divider.repeat(headerLine.length))}`);
 
-  // Print rows
   for (const row of rows) {
-    const line = row
-      .map((cell, i) => ansiPadEnd(cell || "", widths[i]))
-      .join("  ");
-    console.log(`  ${line}`);
+    const line = row.map((cell, i) => ansiPadEnd(fitCell(cell || "", widths[i]), widths[i])).join("  ");
+    console.log(`  ${line.trimEnd()}`);
   }
 }
 
