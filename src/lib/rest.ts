@@ -1,12 +1,8 @@
 /**
- * REST v1 client — proxies every read and write through
- * `https://totalaudiopromo.com/api/v1/*` with a workspace-scoped
- * `tap_ak_*` key.
- *
- * Mirrors `packages/tap-mcp/src/auth.ts → restRequest()` so the two
- * clients behave the same. Per Plan §Pillar 1, this is the way CLI and
- * MCP both consume TAP — Supabase service-role credentials stay
- * available for a 30-day deprecation window only.
+ * REST v1 client. Every CLI read and write goes through
+ * `https://totalaudiopromo.com/api/v1/*` with a workspace-scoped `tap_ak_*`
+ * key. Mirrors `packages/tap-mcp/src/auth.ts → restRequest()` so the CLI
+ * and MCP behave the same.
  */
 
 import { loadConfig } from "../auth.js";
@@ -29,31 +25,12 @@ export class TapApiError extends Error {
 
 const DEFAULT_BASE_URL = "https://totalaudiopromo.com";
 
-/**
- * Resolve the REST base URL. Order:
- *   1. TAP_URL env var
- *   2. config.tapUrl
- *   3. https://totalaudiopromo.com
- */
 export function getTapUrl(): string {
-  if (process.env.TAP_URL) return process.env.TAP_URL;
-  const config = loadConfig();
-  return config?.tapUrl || DEFAULT_BASE_URL;
+  return process.env.TAP_URL || loadConfig()?.tapUrl || DEFAULT_BASE_URL;
 }
 
-/**
- * Resolve the API key. Order:
- *   1. TAP_API_KEY env var
- *   2. config.apiKey
- */
 export function getApiKey(): string | null {
-  if (process.env.TAP_API_KEY) return process.env.TAP_API_KEY;
-  const config = loadConfig();
-  return config?.apiKey ?? null;
-}
-
-export function hasApiKey(): boolean {
-  return Boolean(getApiKey());
+  return loadConfig()?.apiKey ?? null;
 }
 
 export async function restRequest<T = unknown>(
@@ -100,14 +77,23 @@ export async function restRequest<T = unknown>(
   }
 
   if (!res.ok) {
-    const errorMessage =
-      json && typeof json === "object" && "error" in (json as Record<string, unknown>)
-        ? String((json as Record<string, unknown>).error)
-        : text || res.statusText;
-    throw new TapApiError(res.status, errorMessage);
+    throw new TapApiError(res.status, errorMessage(json) || text || res.statusText);
   }
 
   return (json as T) ?? ({} as T);
+}
+
+/**
+ * TAP returns `{ error: "..." }` from most routes and
+ * `{ success: false, error: { code, message } }` from plan and availability
+ * guards (402, 503).
+ */
+function errorMessage(json: unknown): string | null {
+  if (!json || typeof json !== "object" || !("error" in json)) return null;
+  const error = (json as { error: unknown }).error;
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object" && "message" in error) return String(error.message);
+  return null;
 }
 
 export type ApiKeyCheckResult =

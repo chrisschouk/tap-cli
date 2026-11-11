@@ -12,12 +12,10 @@ import { Command } from "commander";
 import chalk from "chalk";
 import * as prompts from "@clack/prompts";
 import { readFileSync } from "node:fs";
-import { getClient, resolveWorkspaceId, hasApiKey } from "../auth.js";
 import { restRequest } from "../lib/rest.js";
 import * as out from "../output.js";
-import { COLOUR } from "../ui/theme.js";
-import { createRailSpinner, stepComplete, blank, summaryBar } from "../ui/format.js";
-import { sectionHeader, navHint } from "../ui/detail.js";
+import { createRailSpinner, blank, summaryBar } from "../ui/format.js";
+import { navHint } from "../ui/detail.js";
 import { handleError } from "../ui/errors.js";
 import {
   type TapContactInsert,
@@ -112,7 +110,6 @@ export function importCommand(): Command {
     .option("--dry-run", "Preview without importing")
     .option("--campaign <id>", "Also add imported contacts to a campaign")
     .option("--enrich", "Queue unenriched contacts for enrichment")
-    .option("-w, --workspace <id>", "Workspace ID")
     .option("--json", "Structured output")
     .action(async (file, opts) => {
       if (!file && !opts.stdin) {
@@ -125,9 +122,6 @@ export function importCommand(): Command {
       const readRail = createRailSpinner("Reading input").start();
 
       try {
-        const supabase = getClient();
-        const wsId = await resolveWorkspaceId(supabase, opts.workspace);
-
         // Read input
         let rawText: string;
         if (opts.stdin) {
@@ -226,155 +220,25 @@ export function importCommand(): Command {
 
         parseRail.succeed(`Parsing                  ${totalRecords} records (${sourceLabel})`);
 
-        if (hasApiKey()) {
-          const payloadContacts = contacts.map(c => ({
-            name: c.name,
-            email: c.email,
-            outlet: c.outlet,
-            role: c.role,
-            genres: c.genres,
-            platform_type: c.platform_type,
-            bbc_station: (c as any).bbc_station,
-          }));
-
-          if (opts.dryRun) {
-            out.info(`Dry run -- would import ${payloadContacts.length} contacts`);
-            return;
-          }
-
-          // Confirmation
-          if (!opts.yes) {
-            const confirmed = await prompts.confirm({
-              message: `Import ${payloadContacts.length} contacts?`,
-            });
-            if (prompts.isCancel(confirmed) || !confirmed) {
-              console.log(chalk.dim("  Cancelled."));
-              return;
-            }
-          }
-
-          const importRail = createRailSpinner(`Importing ${payloadContacts.length} contacts`).start();
-
-          const res = await restRequest<{
-            imported: number;
-            results: Array<{ email: string; status: string; reason?: string }>;
-          }>("/api/v1/contacts", {
-            method: "POST",
-            body: {
-              contacts: payloadContacts,
-            },
-          });
-
-          importRail.succeed(`Imported                ${res.imported} contacts`);
-
-          const skipped = res.results.filter(r => r.status === 'skipped');
-          if (skipped.length > 0) {
-            out.warn(`${skipped.length} duplicate or invalid contacts skipped`);
-          }
-
-          if (opts.campaign && res.imported > 0) {
-            const searchEmails = payloadContacts.map(c => c.email);
-            const contactsRes = await restRequest<{ contacts: any[] }>("/api/v1/contacts", {
-              query: { limit: 100 },
-            });
-            const importedIds = contactsRes.contacts
-              .filter(c => searchEmails.includes(c.email))
-              .map(c => c.id);
-
-            if (importedIds.length > 0) {
-              const linkRail = createRailSpinner(`Linking to campaign`).start();
-              await restRequest(`/api/v1/campaigns/${encodeURIComponent(opts.campaign)}/contacts`, {
-                method: "POST",
-                body: {
-                  contact_ids: importedIds,
-                },
-              });
-              linkRail.succeed(`Linked contacts to campaign`);
-            }
-          }
-
-          if (opts.enrich) {
-            out.warn("Forcing enrichment queueing is not supported in REST mode.");
-          }
-
-          if (opts.json) {
-            out.json(res);
-            return;
-          }
-
-          blank();
-          summaryBar([`${res.imported} imported`, `${skipped.length} skipped`]);
-          navHint(["tap queue"]);
-          blank();
-          return;
-        }
-
-        // Deduplicate against workspace
-        const dedupRail = createRailSpinner("Deduplicating").start();
-
-        const emails = contacts.map((c) => c.email);
-        const { data: existing } = await supabase
-          .from("tap_contacts")
-          .select("email")
-          .eq("workspace_id", wsId)
-          .in("email", emails);
-
-        const existingEmails = new Set((existing || []).map((c) => c.email));
-        const newContacts = contacts.filter((c) => !existingEmails.has(c.email));
-        const alreadyInTap = contacts.length - newContacts.length;
-
-        dedupRail.succeed(
-          `Deduplicating            ${newContacts.length} new, ${alreadyInTap} existing`,
-        );
-
-        // Summary
-        blank();
-        sectionHeader("Import Preview");
-        console.log(`  ${"Valid emails".padEnd(18)}${contacts.length}`);
-        if (skippedInvalid > 0) {
-          console.log(`  ${"Invalid".padEnd(18)}${chalk.hex(COLOUR.warning)(`${skippedInvalid} skipped`)}`);
-        }
-        if (skippedDuplicate > 0) {
-          console.log(`  ${"Duplicates".padEnd(18)}${chalk.hex(COLOUR.warning)(`${skippedDuplicate} skipped`)}`);
-        }
-        if (alreadyInTap > 0) {
-          console.log(`  ${"Already in TAP".padEnd(18)}${chalk.hex(COLOUR.warning)(`${alreadyInTap} skipped`)}`);
-        }
-        console.log(`  ${"New contacts".padEnd(18)}${chalk.hex(COLOUR.success)(String(newContacts.length))}`);
-        if (withEnrichment > 0) {
-          console.log(`  ${"With enrichment".padEnd(18)}${chalk.hex(COLOUR.primary)(`${withEnrichment} from sink`)}`);
-        }
-        blank();
-
-        if (opts.json && opts.dryRun) {
-          out.json({
-            dryRun: true,
-            source: sourceLabel,
-            totalRecords,
-            validEmails: contacts.length,
-            skippedInvalid,
-            skippedDuplicate,
-            alreadyInTap,
-            newContacts: newContacts.length,
-            withEnrichment,
-          });
-          return;
-        }
-
-        if (newContacts.length === 0) {
-          out.info("All contacts already exist in TAP");
-          return;
-        }
+        const payloadContacts = contacts.map(c => ({
+          name: c.name,
+          email: c.email,
+          outlet: c.outlet,
+          role: c.role,
+          genres: c.genres,
+          platform_type: c.platform_type,
+          bbc_station: (c as any).bbc_station,
+        }));
 
         if (opts.dryRun) {
-          out.info("Dry run -- nothing imported");
+          out.info(`Dry run -- would import ${payloadContacts.length} contacts`);
           return;
         }
 
         // Confirmation
         if (!opts.yes) {
           const confirmed = await prompts.confirm({
-            message: `Import ${newContacts.length} contacts?`,
+            message: `Import ${payloadContacts.length} contacts?`,
           });
           if (prompts.isCancel(confirmed) || !confirmed) {
             console.log(chalk.dim("  Cancelled."));
@@ -382,108 +246,58 @@ export function importCommand(): Command {
           }
         }
 
-        // Batch insert with progress
-        const importRail = createRailSpinner(
-          `Importing ${newContacts.length} contacts`,
-        ).start();
+        const importRail = createRailSpinner(`Importing ${payloadContacts.length} contacts`).start();
 
-        const CHUNK_SIZE = 100;
-        let imported = 0;
-        let errors = 0;
+        const res = await restRequest<{
+          imported: number;
+          results: Array<{ email: string; status: string; reason?: string }>;
+        }>("/api/v1/contacts", {
+          method: "POST",
+          body: {
+            contacts: payloadContacts,
+          },
+        });
 
-        for (let i = 0; i < newContacts.length; i += CHUNK_SIZE) {
-          const chunk = newContacts.slice(i, i + CHUNK_SIZE);
-          const rows = chunk.map((c) => ({
-            workspace_id: wsId,
-            ...c,
-            source: c.enrichment_source === "sink" ? "sink-import" : "cli-import",
-            pipeline_status: "new" as const,
-          }));
+        importRail.succeed(`Imported                ${res.imported} contacts`);
 
-          const { error } = await supabase
-            .from("tap_contacts")
-            .upsert(rows, { onConflict: "workspace_id,email", ignoreDuplicates: true });
+        const skipped = res.results.filter(r => r.status === 'skipped');
+        if (skipped.length > 0) {
+          out.warn(`${skipped.length} duplicate or invalid contacts skipped`);
+        }
 
-          if (error) {
-            errors++;
-          } else {
-            imported += chunk.length;
+        if (opts.campaign && res.imported > 0) {
+          const searchEmails = payloadContacts.map(c => c.email);
+          const contactsRes = await restRequest<{ contacts: any[] }>("/api/v1/contacts", {
+            query: { limit: 100 },
+          });
+          const importedIds = contactsRes.contacts
+            .filter(c => searchEmails.includes(c.email))
+            .map(c => c.id);
+
+          if (importedIds.length > 0) {
+            const linkRail = createRailSpinner(`Linking to campaign`).start();
+            await restRequest(`/api/v1/campaigns/${encodeURIComponent(opts.campaign)}/contacts`, {
+              method: "POST",
+              body: {
+                contact_ids: importedIds,
+              },
+            });
+            linkRail.succeed(`Linked contacts to campaign`);
           }
         }
 
-        importRail.succeed(`Importing                ${imported} contacts`);
-
-        // Add to campaign if specified
-        if (opts.campaign && imported > 0) {
-          const importedEmails = newContacts.map((c) => c.email);
-          const { data: importedContacts } = await supabase
-            .from("tap_contacts")
-            .select("id")
-            .eq("workspace_id", wsId)
-            .in("email", importedEmails);
-
-          if (importedContacts && importedContacts.length > 0) {
-            const campaignLinks = importedContacts.map((c) => ({
-              project_id: opts.campaign,
-              contact_id: c.id,
-              pitch_status: "not_pitched",
-            }));
-
-            await supabase
-              .from("campaign_contacts")
-              .upsert(campaignLinks, {
-                onConflict: "project_id,contact_id",
-                ignoreDuplicates: true,
-              });
-          }
-
-          stepComplete(`Campaign                 ${opts.campaign.slice(0, 8)}`);
-        }
-
-        // Queue for enrichment
-        if (opts.enrich && imported > 0) {
-          const unenrichedEmails = newContacts
-            .filter((c) => !c.enriched)
-            .map((c) => c.email);
-
-          if (unenrichedEmails.length > 0) {
-            await supabase
-              .from("tap_contacts")
-              .update({ enrichment_source: "queued" })
-              .eq("workspace_id", wsId)
-              .in("email", unenrichedEmails)
-              .is("enriched_at", null);
-
-            stepComplete(`Enrichment queued        ${unenrichedEmails.length} contacts`);
-          }
-        }
-
-        if (errors > 0) {
-          out.warn(`${errors} batch${errors > 1 ? "es" : ""} had errors`);
+        if (opts.enrich) {
+          out.warn("Forcing enrichment queueing is not supported in REST mode.");
         }
 
         if (opts.json) {
-          out.json({
-            imported,
-            withEnrichment: newContacts.filter((c) => c.enriched).length,
-            errors,
-          });
+          out.json(res);
+          return;
         }
 
-        // Summary
-        const summaryParts: string[] = [];
-        summaryParts.push(`${imported} imported`);
-        if (errors > 0) summaryParts.push(chalk.hex(COLOUR.danger)(`${errors} errors`));
-        if (newContacts.filter((c) => c.enriched).length > 0) {
-          summaryParts.push(`${newContacts.filter((c) => c.enriched).length} enriched`);
-        }
         blank();
-        summaryBar(summaryParts);
-
-        navHint([
-          "tap contacts list --sort last-contacted",
-          "tap queue",
-        ]);
+        summaryBar([`${res.imported} imported`, `${skipped.length} skipped`]);
+        navHint(["tap queue"]);
         blank();
       } catch (err) {
         handleError(err);

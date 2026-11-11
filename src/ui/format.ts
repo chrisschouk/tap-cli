@@ -27,13 +27,13 @@ const COMMANDS = [
   ["campaigns", "list, create, view details"],
   ["contacts", "search, add, view details"],
   ["pitch", "generate AI pitch drafts"],
-  ["send", "send a pitch via Gmail"],
+  ["send", "pitches waiting for approval"],
   ["outcome", "log a campaign outcome"],
   ["queue", "today's action queue"],
-  ["discover", "find new contacts"],
+  ["discover", "find new contacts in TAP"],
   ["import", "import contacts from CSV"],
-  ["stats", "workspace statistics"],
-  ["watch", "live campaign updates"],
+  ["stats", "workspace statistics in TAP"],
+  ["watch", "live campaign updates in TAP"],
 ];
 
 const BOX_WIDTH = 56;

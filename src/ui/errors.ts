@@ -1,21 +1,34 @@
 /**
  * Centralised error formatting.
  *
- * Transforms raw Node/Supabase errors into friendly terminal messages
+ * Transforms TAP API and Node errors into friendly terminal messages
  * with contextual hints for resolution.
  */
 
 import chalk from "chalk";
 import { GLYPH } from "./theme.js";
+import { TapApiError } from "../lib/rest.js";
 
 interface FormattedError {
   message: string;
   hint?: string;
 }
 
+const API_STATUS_HINT: Record<number, string> = {
+  401: "Run `tap auth login` with a current tap_ak_ key.",
+  402: "The TAP API needs the year plan. See https://totalaudiopromo.com/settings/billing.",
+  403: "Your API key lacks the scope for this command. Mint a broader key in Settings, API keys.",
+  404: "Check the ID and try again.",
+  429: "Rate limit reached. Wait a minute and try again.",
+};
+
 function formatError(err: unknown): FormattedError {
   if (!(err instanceof Error)) {
     return { message: "Unknown error" };
+  }
+
+  if (err instanceof TapApiError) {
+    return { message: err.message, hint: API_STATUS_HINT[err.status] };
   }
 
   const msg = err.message;
@@ -63,7 +76,7 @@ function formatError(err: unknown): FormattedError {
   }
 
   // Auth errors
-  if (msg.includes("JWT") || msg.includes("401") || msg.includes("not authenticated")) {
+  if (msg.includes("401") || msg.includes("not authenticated")) {
     return {
       message: "Authentication failed",
       hint: "Run `tap auth login` to reconnect.",
@@ -75,26 +88,6 @@ function formatError(err: unknown): FormattedError {
       message: "Access denied",
       hint: "Check your workspace permissions.",
     };
-  }
-
-  // Supabase errors
-  if (msg.includes("23505") || msg.includes("duplicate key")) {
-    return {
-      message: "Already exists",
-      hint: "This record already exists in your workspace.",
-    };
-  }
-
-  if (msg.includes("PGRST")) {
-    return {
-      message: "Database error",
-      hint: msg,
-    };
-  }
-
-  // Gmail errors
-  if (msg.includes("Gmail") || msg.includes("gmail")) {
-    return { message: msg };
   }
 
   // Default: just the message
