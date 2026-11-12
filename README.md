@@ -60,7 +60,7 @@
 | 🚀 | **Campaign management** | Create, list, filter, and update campaigns from the terminal |
 | 👤 | **Contact management** | Search, add, enrich, and import contacts with deduplication |
 | ✍️ | **AI pitch drafting** | TAP drafts pitch variants per contact and saves them for your review |
-| 📬 | **Approve in TAP** | See which pitches wait for you and jump straight to where you approve and send them |
+| 📬 | **Approve from your phone** | Ask for approval from the terminal, approve in TAP on your phone, and see each pitch's result back in the terminal |
 | 📋 | **Action queue** | See what needs you today: follow-ups, replies, stalled campaigns, coverage to log |
 | 🧠 | **Skills** | List, run, fork, and inspect workspace skills from the terminal |
 | 🔐 | **Scoped keys** | Same `tap_ak_*` keys as the REST API and MCP server |
@@ -286,9 +286,40 @@ tap pitch <campaign-id> <contact-id> --json
 
 ---
 
+### `tap approve` — ask for approval, answer in TAP
+
+`tap approve` asks a person signed in to TAP to approve a campaign's pitches. It lists the pitches waiting for approval, lets you choose them, and prints a four-character code, the approve link and a QR code of the link. You open the link on your phone or computer, check that the page shows the same code, and approve there. The CLI waits, then shows which pitches were approved and why any were skipped.
+
+The CLI never approves or sends. Its API key can create a request, read the answer and withdraw the request. Only a person signed in to TAP in a browser can answer it.
+
+```bash
+tap approve <campaign-id>                          # choose pitches, ask, wait
+tap approve <campaign-id> --all                    # every pitch waiting for approval
+tap approve <campaign-id> --pitch <id> --pitch <id>
+tap approve <campaign-id> --all --no-wait --json   # for agents: return the request at once
+tap approve status <request-id> --wait --json      # then wait for the answer
+```
+
+While it waits, `o` opens the link on this computer and `c` or Ctrl+C withdraws the request. A request expires after 15 minutes. If nothing waits for approval but the campaign has drafts, `tap approve` offers to queue them for review first. Queueing approves nothing.
+
+In the chooser, space chooses a pitch, `a` chooses all or none, `r` shows the whole pitch, and enter asks.
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--all` | Ask about every pitch waiting for approval (up to 50) |
+| `--pitch <id>` | Ask about this pitch. Repeat for more |
+| `--no-wait` | Return once the request exists. Check it with `tap approve status <request-id>` |
+| `--json` | Print the request, or the answer with a per-pitch summary, as JSON |
+
+`tap approve` exits 1 when the request ends with nothing approved (declined, expired, withdrawn or replaced by a newer request), and 0 otherwise.
+
+---
+
 ### `tap send` — see what waits for your approval
 
-Approving and sending a pitch happen in TAP, by you. `tap send` lists every one of the campaign's pitches that still needs you: drafts, pitches waiting for approval, approved pitches TAP has not sent yet, and approved pitches whose send failed or is held for payment. It then prints the link to the release's pitching tab where you approve and send them.
+Approving and sending a pitch happen in TAP, by you. `tap send` lists every one of the campaign's pitches that still needs you: drafts, pitches waiting for approval, approved pitches TAP has not sent yet, and approved pitches whose send failed or is held for payment. It then prints the link to the release's pitching tab where you approve and send them. To ask for approval from the terminal and approve on your phone, use `tap approve`.
 
 ```bash
 tap send <campaign-id>

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+New `tap approve <campaign-id>` asks a signed-in person to approve pitches and waits for the answer.
+
+- Lists the pitches waiting for approval and lets you choose them, read a full pitch, then ask.
+  `--all` and a repeatable `--pitch <id>` choose without the chooser.
+- Prints the request's four-character code, the approve link, a QR code of the link and the
+  expiry time. `o` opens the link, `c` or Ctrl+C withdraws the request.
+- Waits for the answer, then shows each pitch as approved or skipped, with the approve page's
+  reason, and what to do next.
+- `--json` and `--no-wait` let an agent create the request and come back later with
+  `tap approve status <request-id> --wait`.
+- When nothing waits for approval but drafts exist, offers to queue them for review. Queueing
+  approves nothing.
+- The CLI still never approves or sends: the key can only create, read and withdraw a request.
+- `tap send` points at `tap approve`, and `tap auth login` lists the `agents:write` and
+  `agents:read` scopes it needs.
+
 The CLI talks to TAP only through the REST v1 API with a `tap_ak_` key. The legacy
 direct-Supabase mode is gone.
 
