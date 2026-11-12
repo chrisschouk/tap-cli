@@ -6,6 +6,8 @@
  * approves or sends; it lists what is waiting and links to the release's
  * pitching tab, where the artist approves and TAP sends.
  *
+ * To ask for approval from the terminal and answer on a phone, see `tap approve`.
+ *
  * Usage:
  *   tap send <campaign-id>           -- list waiting pitches and print the TAP link
  *   tap send <campaign-id> --open    -- also open the link in the browser
@@ -41,6 +43,8 @@ const STATE_COLOUR: Record<PendingState, string> = {
   send_failed: COLOUR.danger,
   held_for_payment: COLOUR.warning,
 };
+
+const waitingCount = (pending: PendingPitch[]) => pending.filter((p) => p.state === "pending_approval").length;
 
 function renderPending(pitches: PendingPitch[]): void {
   const rows = pitches.map((p) => [
@@ -85,11 +89,12 @@ export function sendCommand(): Command {
         blank();
         out.info("Approve and send in TAP. The CLI never sends a pitch.");
         console.log(`  ${chalk.hex(COLOUR.primary)(url)}`);
+        if (waitingCount(pending) > 0) out.info(`Or ask from here and approve on your phone: tap approve ${campaign.id}`);
         if (opts.open) openUrl(url, (message) => out.error(`Failed to open browser: ${message}`));
 
         blank();
         summaryBar([`${pending.length} waiting`, campaignLabel(campaign)]);
-        navHint([`tap send ${campaignId} --open`, `tap campaigns show ${campaignId}`]);
+        navHint([`tap approve ${campaignId}`, `tap send ${campaignId} --open`, `tap campaigns show ${campaignId}`]);
         blank();
       } catch (err) {
         rail.fail("Could not load pitches");

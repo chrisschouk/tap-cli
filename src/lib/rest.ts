@@ -17,6 +17,8 @@ export class TapApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    /** The parsed JSON body, for routes whose refusal carries detail (a 422's per-pitch reasons). */
+    public readonly body: unknown = null,
   ) {
     super(message);
     this.name = "TapApiError";
@@ -101,7 +103,7 @@ export async function restRequest<T = unknown>(
   }
 
   if (!res.ok) {
-    throw new TapApiError(res.status, errorMessage(json) || text || res.statusText);
+    throw new TapApiError(res.status, errorMessage(json) || text || res.statusText, json);
   }
 
   return (json as T) ?? ({} as T);

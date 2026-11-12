@@ -28,6 +28,7 @@ export const PENDING_STATE_LABEL: Record<PendingState, string> = {
 export interface PendingPitch {
   id: string;
   subject: string;
+  body: string | null;
   state: PendingState;
   scheduledFor: string | null;
 }
@@ -36,6 +37,7 @@ interface CampaignPitchRow {
   id: string;
   title: string | null;
   subject: string | null;
+  body?: string | null;
 }
 
 export interface OutreachQueueRow {
@@ -71,6 +73,7 @@ export function toPendingPitches(
     pending.push({
       id: row.id,
       subject: pitch?.subject || pitch?.title || "No subject",
+      body: pitch?.body ?? null,
       state,
       scheduledFor: row.scheduled_for,
     });
