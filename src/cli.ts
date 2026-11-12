@@ -19,16 +19,13 @@
 import chalk from "chalk";
 import { intro } from "./ui/format.js";
 import { buildProgram, VERSION } from "./program.js";
-import { interrupt } from "./ui/interrupt.js";
+import { guardOutput, interrupt } from "./ui/interrupt.js";
 
 // chalk ignores NO_COLOR (https://no-color.org); honour it here.
 if (process.env.NO_COLOR) chalk.level = 0;
 
-// A closed terminal makes writes fail; the SIGHUP handler still has to withdraw an open request.
-process.on("SIGHUP", () => {
-  for (const stream of [process.stdout, process.stderr]) stream.on("error", () => {});
-});
-for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, interrupt);
+guardOutput();
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => interrupt("signal"));
 
 // Handle --version/-v before Commander
 const hasVersionFlag = process.argv.includes("--version") || process.argv.includes("-v");

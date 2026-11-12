@@ -31,6 +31,19 @@ export class TapApiError extends Error {
   }
 }
 
+/**
+ * TAP answered 2xx, but the body is not the shape the route promises: empty,
+ * not JSON, a proxy's HTML page, or a field missing or of the wrong kind.
+ * `restRequest` hands such a body over as `{}`, so the caller's parser throws
+ * this. Retried for a short while, as a proxy or a deploy can serve one.
+ */
+export class MalformedReply extends Error {
+  constructor(public readonly detail: string) {
+    super(`TAP's reply was not understood: ${detail}`);
+    this.name = "MalformedReply";
+  }
+}
+
 const DEFAULT_BASE_URL = "https://totalaudiopromo.com";
 
 export function getTapUrl(): string {

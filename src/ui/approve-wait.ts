@@ -15,6 +15,9 @@ import type { RetryHooks } from "../lib/retry.js";
 import { settle, type Ending, type SessionView, type StopRequest } from "../lib/approval-session.js";
 
 const accent = chalk.hex(COLOUR.primary);
+
+/** What the ask shows. */
+type Ask = Pick<CreatedRequest, "code" | "url" | "expires_at">;
 const QR_GAP = 4;
 const INFO_WIDTH = 46;
 
@@ -28,7 +31,7 @@ export function timeLeft(iso: string, now = Date.now()): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-function infoLines(created: CreatedRequest): string[] {
+function infoLines(created: Ask): string[] {
   return [
     `${chalk.dim("Code")}    ${accent.bold(created.code.split("").join(" "))}`,
     "",
@@ -45,7 +48,7 @@ function qrLines(url: string): string[] {
 }
 
 /** QR and words side by side when they fit, stacked when only the QR fits, words alone below that. */
-function askLayout(created: CreatedRequest, width: number, withQr: boolean): string[] {
+function askLayout(created: Ask, width: number, withQr: boolean): string[] {
   const info = infoLines(created);
   if (!withQr) return info.map((l) => `  ${l}`);
   const qr = qrLines(created.url);
@@ -56,7 +59,7 @@ function askLayout(created: CreatedRequest, width: number, withQr: boolean): str
   return qr.map((line, i) => `  ${line}${" ".repeat(QR_GAP)}${info[i - top] ?? ""}`.trimEnd());
 }
 
-export function printAsk(created: CreatedRequest, opts: { qr: boolean }): void {
+export function printAsk(created: Ask, opts: { qr: boolean }): void {
   const width = process.stdout.columns || 100;
   console.log("");
   for (const line of askLayout(created, width, opts.qr)) console.log(line);

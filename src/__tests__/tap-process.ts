@@ -26,6 +26,8 @@ export function freshHome(config?: object): string {
 export interface RunOptions {
   env?: Record<string, string | undefined>;
   stdin?: string;
+  /** Leave stdin open for `onSpawn` to close, instead of closing it at once. */
+  stdinOpen?: boolean;
   onSpawn?: (child: ChildProcess) => void;
 }
 
@@ -54,7 +56,7 @@ export function runTap(server: FakeTap, args: string[], opts: RunOptions = {}): 
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));
-    child.stdin.end(opts.stdin ?? "");
+    if (!opts.stdinOpen) child.stdin.end(opts.stdin ?? "");
     opts.onSpawn?.(child);
     child.on("close", (code) =>
       resolve({ code: code ?? 1, stdout, stderr, output: stdout + stderr, calls: server.requests.slice(before) }),

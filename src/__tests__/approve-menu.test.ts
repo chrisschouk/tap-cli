@@ -112,6 +112,12 @@ describe("tap approve inside the interactive menu", () => {
     expect(run.stdout).toContain("You quit before TAP confirmed an answer or a withdrawal.");
     expect(run.stdout).toContain(`tap approve status ${id} --wait`);
     expect(run.stdout).not.toMatch(/CommandExit|exit 130|Error:/);
+    const HIDE = "\x1B[?25l";
+    const SHOW = "\x1B[?25h";
+    const report = run.stdout.indexOf("You quit before");
+    const waitEnded = run.stdout.lastIndexOf("c cancel", report);
+    expect(run.stdout.lastIndexOf(HIDE, waitEnded)).toBeGreaterThan(-1);
+    expect(run.stdout.lastIndexOf(SHOW, report)).toBeGreaterThan(waitEnded);
     await until(() => onlyApproval().status === "cancelled", "the slow withdrawal landed");
   }, 40_000);
 });

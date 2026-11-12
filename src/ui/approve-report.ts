@@ -11,7 +11,6 @@ import { blank, summaryBar } from "./format.js";
 import { describeOutcome, rejectionLabel, type Outcome, type Tone } from "../lib/approval-outcome.js";
 import type { ApprovalRequest, RejectedPitch } from "../lib/approval-requests.js";
 import type { Ending, RequestRef } from "../lib/approval-session.js";
-import { dashboard } from "../lib/dashboard.js";
 import { printAsk } from "./approve-wait.js";
 
 /** Recipient email to outlet, from the campaign's contacts. */
@@ -66,7 +65,7 @@ function countParts(request: ApprovalRequest): string[] {
   return [`${approved} approved`, `${request.item_count - approved} not approved`];
 }
 
-export function printOutcome(request: ApprovalRequest, outlets: Outlets, campaign: { id?: string; label?: string }): void {
+function printOutcome(id: string, request: ApprovalRequest, outlets: Outlets, campaign: { id?: string; label?: string }): void {
   const outcome = describeOutcome(request, campaign.id);
   blank();
   printHeadline(outcome, request);
@@ -86,6 +85,7 @@ export function printOutcome(request: ApprovalRequest, outlets: Outlets, campaig
   }
   blank();
   if (outcome.next) out.info(outcome.next);
+  if (request.status !== "pending") out.info(`Request ${id}. Read it again with ${statusCommand(id)}`);
   out.info("The CLI never approves or sends. Approval happens in TAP, by a person.");
   blank();
   summaryBar([...countParts(request), ...(campaign.label ? [campaign.label] : [])]);
@@ -148,8 +148,8 @@ function printLeftOpen(ref: RequestRef, reason: string): void {
 }
 
 function printOpen(ref: RequestRef, request: ApprovalRequest | null, ctx: RenderContext): void {
-  if (request) return printOutcome(request, ctx.outlets, ctx.campaign);
-  printAsk({ id: ref.id, code: ref.code ?? "", url: ref.url ?? "", expires_at: ref.expires_at ?? "", status: "pending" }, { qr: ctx.qr });
+  if (request) return printOutcome(ref.id, request, ctx.outlets, ctx.campaign);
+  printAsk({ code: ref.code ?? "", url: ref.url ?? "", expires_at: ref.expires_at ?? "" }, { qr: ctx.qr });
   out.info(`Check the answer with ${statusCommand(ref.id)}`);
   blank();
 }
@@ -163,42 +163,80 @@ function printGone(ref: RequestRef): void {
 
 /** --json: stdout carries one object, and `outcome` names the ending. */
 export function endingJson(ref: RequestRef, ending: Ending, campaignId?: string): object {
+  const named = { id: ref.id, status_command: statusCommand(ref.id) };
   switch (ending.kind) {
     case "answered":
     case "withdrawn":
-      return { outcome: ending.kind, ...outcomeJson(ending.request, campaignId) };
+      return { outcome: ending.kind, ...named, ...outcomeJson(ending.request, campaignId) };
     case "open":
       return ending.request
-        ? { outcome: "open", ...outcomeJson(ending.request, campaignId) }
+        ? { outcome: "open", ...named, ...outcomeJson(ending.request, campaignId) }
         : { outcome: "open", ...ref, status: "pending", status_command: statusCommand(ref.id) };
     case "gone":
       return { outcome: "gone", id: ref.id, status: "gone", error: "Approval request not found" };
     case "left_open":
       return { outcome: "left_open", ...ref, status: "unknown", reason: ending.reason, status_command: statusCommand(ref.id) };
+    default:
+      return unknownEnding(ending);
   }
 }
 
-/** The one place a request's ending is reported, as text or as JSON. */
-export function renderEnding(ref: RequestRef, ending: Ending, ctx: RenderContext): void {
+function unknownEnding(ending: never): never {
+  throw new Error(`No report for ending ${String((ending as { kind?: unknown })?.kind)}`);
+}
+
+function render(ref: RequestRef, ending: Ending, ctx: RenderContext): void {
   if (ctx.json) return out.json(endingJson(ref, ending, ctx.campaign.id));
   switch (ending.kind) {
     case "answered":
     case "withdrawn":
-      return printOutcome(ending.request, ctx.outlets, ctx.campaign);
+      return printOutcome(ref.id, ending.request, ctx.outlets, ctx.campaign);
     case "open":
       return printOpen(ref, ending.request, ctx);
     case "gone":
       return printGone(ref);
     case "left_open":
       return printLeftOpen(ref, ending.reason);
+    default:
+      return unknownEnding(ending);
   }
 }
 
-/** The create failed in a way TAP may still have carried out, so there is no id to show. */
+const textOf = (value: unknown): string | null => (typeof value === "string" && value.length > 0 ? value : null);
+
+/** The request's details from a ref that may hold anything. */
+function detailsOf(ref: RequestRef): { id: string | null; code: string | null; url: string | null; expires_at: string | null } {
+  const raw = (ref ?? {}) as Partial<Record<keyof RequestRef, unknown>>;
+  return { id: textOf(raw.id), code: textOf(raw.code), url: textOf(raw.url), expires_at: textOf(raw.expires_at) };
+}
+
+/** What any ending can still say when its full report failed: the request, and how to read it. Touches nothing that can throw. */
+function renderFallback(ref: RequestRef, ending: Ending, ctx: RenderContext): void {
+  const details = detailsOf(ref);
+  const command = details.id ? statusCommand(details.id) : null;
+  if (ctx?.json) {
+    const outcome = textOf((ending as { kind?: unknown } | null)?.kind) ?? "unknown";
+    return console.log(JSON.stringify({ outcome, ...details, status: "unknown", status_command: command, error: "The CLI could not report this answer in full" }, null, 2));
+  }
+  console.error("  The CLI could not report this answer in full.");
+  const rows: Array<[string, string | null]> = [["Request", details.id], ["Code", details.code], ["Link", details.url], ["Expires", details.expires_at]];
+  for (const [label, value] of rows) if (value) console.log(`  ${label.padEnd(9)}${value}`);
+  if (command) console.log(`  Read the answer with ${command}`);
+}
+
+/** The one place a request's ending is reported, as text or as JSON. Never throws: a report that fails falls back to the request's details. */
+export function renderEnding(ref: RequestRef, ending: Ending, ctx: RenderContext): void {
+  try {
+    render(ref, ending, ctx);
+  } catch {
+    renderFallback(ref, ending, ctx);
+  }
+}
+
+/** The create failed in a way TAP may still have carried out, so there is no id to show. TAP has no page that lists open requests. */
 export function printCreateUnknown(reason: string, campaignId: string, json: boolean): void {
-  const url = dashboard.approveAndSend(campaignId);
-  const next = `Look for it in TAP at ${url}. Asking again with tap approve ${campaignId} replaces a request nobody has started answering.`;
-  if (json) return out.json({ outcome: "create_unknown", status: "unknown", reason, may_exist: true, check_url: url, next });
+  const next = `TAP has no page that lists open requests, so there is nowhere to look it up. Asking again with tap approve ${campaignId} replaces any request nobody has started answering.`;
+  if (json) return out.json({ outcome: "create_unknown", status: "unknown", reason, may_exist: true, next });
   blank();
   out.error(`${reason}. TAP may have created the request anyway.`);
   out.info(next);

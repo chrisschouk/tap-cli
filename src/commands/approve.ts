@@ -25,7 +25,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import * as clack from "@clack/prompts";
-import { fetchAllPages, restRequest } from "../lib/rest.js";
+import { fetchAllPages, MalformedReply, restRequest, TapApiError } from "../lib/rest.js";
 import { fetchPendingPitches, type PendingPitch } from "../lib/pending-pitches.js";
 import {
   ApprovalRejected,
@@ -37,7 +37,7 @@ import {
   type CreatedRequest,
 } from "../lib/approval-requests.js";
 import { StopRequest, exitCodeOf, follow, refOf, type Ending, type RequestRef } from "../lib/approval-session.js";
-import { describeFailure, type RetryHooks } from "../lib/retry.js";
+import type { RetryHooks } from "../lib/retry.js";
 import { dashboard } from "../lib/dashboard.js";
 import { openUrl } from "../lib/browser.js";
 import * as out from "../output.js";
@@ -46,7 +46,7 @@ import { campaignLabel, navHint } from "../ui/detail.js";
 import { blank, createRailSpinner, stepComplete } from "../ui/format.js";
 import { handleError } from "../ui/errors.js";
 import { selectCampaign } from "../ui/actions.js";
-import { onInterrupt } from "../ui/interrupt.js";
+import { onInterrupt, outputClosed, outputLost } from "../ui/interrupt.js";
 import { pickPitches, recipientText, type PickerPitch } from "../ui/pitch-picker.js";
 import { printAsk, waitOnScreen } from "../ui/approve-wait.js";
 import { pitchTable, printCreateUnknown, printRejected, rejectedJson, renderEnding, type Outlets, type RenderContext } from "../ui/approve-report.js";
@@ -175,10 +175,14 @@ function askedDetail(asked: number, chosen: number, code: string): string {
 
 /** Why the create failed, for a failure TAP may have carried out anyway. */
 function createFailure(err: unknown, stop: StopRequest): string {
-  return stop.quit.aborted ? "You quit before TAP answered" : describeFailure(err);
+  if (stop.quit.aborted) return "You quit before TAP answered";
+  if (err instanceof MalformedReply) return `TAP answered, but the CLI could not read the reply (${err.detail})`;
+  if (err instanceof TapApiError) return `TAP answered ${err.status}`;
+  if (err instanceof Error && err.name === "TimeoutError") return "TAP took too long to answer";
+  return "The connection was lost before TAP's answer arrived";
 }
 
-/** Nothing exists yet unless TAP may have created the request; then say where to look, as there is no id. */
+/** Nothing exists yet unless TAP may have created the request; then say so, and that asking again replaces it, as there is no id. */
 function askFailed(err: unknown, loaded: Loaded, opts: ApproveOptions, stop: StopRequest): number {
   if (err instanceof ApprovalRejected) {
     if (opts.json) out.json(rejectedJson(err.rejected));
@@ -231,7 +235,7 @@ function finalise(ref: RequestRef, ending: Ending, ctx: RenderContext): number {
 /** From here on an interrupt is intent: the handler presses `stop`, and the flow turns that into an ending. */
 async function withStopRequest(run: (stop: StopRequest) => Promise<number>): Promise<number> {
   const stop = new StopRequest();
-  const release = onInterrupt(() => stop.press());
+  const release = onInterrupt((cause) => (cause === "signal" ? stop.press() : stop.request()));
   try {
     return await run(stop);
   } finally {
@@ -245,7 +249,12 @@ async function askAndWait(ids: string[], chosen: number, loaded: Loaded, opts: A
   if (!opts.json) stepComplete("Asked", askedDetail(ids.length, chosen, created.code));
   const ending = await waitFor(created, loaded, opts, stop);
   const campaign = { id: loaded.campaign.id, label: campaignLabel(loaded.campaign) };
-  return finalise(refOf(created), ending, { json: Boolean(opts.json), qr: interactive(opts), outlets: loaded.outlets, campaign });
+  const ctx = { json: Boolean(opts.json), qr: interactive(opts), outlets: loaded.outlets, campaign };
+  const reportedToLiveStream = outputClosed();
+  const code = finalise(refOf(created), ending, ctx);
+  if (reportedToLiveStream || !(await outputLost())) return code;
+  // The output closed under the report, so nobody read it. A request left open by choice is withdrawn; either way the report goes again to the stream that works.
+  return finalise(refOf(created), ending.kind === "open" ? await waitFor(created, loaded, opts, stop) : ending, ctx);
 }
 
 async function resolveCampaign(campaignId: string | undefined, opts: ApproveOptions): Promise<string> {

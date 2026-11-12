@@ -39,7 +39,11 @@ export type Fault =
   /** The v1 gate refusing the key mid-wait: revoked (401) or scope removed (403). */
   | { status: 401 | 403 }
   | { dropAfterMs: number }
-  | { delayMs: number };
+  | { delayMs: number }
+  /** Answer at once with this body verbatim: empty, not JSON, a proxy's page. */
+  | { body: string; status?: number }
+  /** Answer at once, with the payload as `edit` returns it. */
+  | { edit: (payload: Record<string, unknown>) => unknown };
 
 export interface FaultRule {
   method: string;
@@ -47,6 +51,8 @@ export interface FaultRule {
   /** Match only requests carrying these query values, such as the long poll's `wait: "25"`. */
   query?: Record<string, string>;
   fault: Fault;
+  /** Serve this fault to every matching request, not just the first. */
+  sticky?: boolean;
 }
 
 /** A fault as the fake served it, with the fake's own clock. */
@@ -419,8 +425,7 @@ export function fakeTapState(opts: FakeTapOptions = {}, appUrl = "https://totala
       answered_via: null,
     };
     approvals.set(approval.id, approval);
-    const view = publicRequest(approval);
-    return [201, { id: view.id, code: view.code, url: view.url, expires_at: view.expires_at, status: view.status }];
+    return [201, publicRequest(approval)];
   };
 
   const readApproval: Handler = ({ params }) => {
@@ -548,7 +553,8 @@ export function fakeTapState(opts: FakeTapOptions = {}, appUrl = "https://totala
   function takeFault(method: string, path: string, query: Record<string, string>): Fault | null {
     const index = faults.findIndex((f) => ruleMatches(f, method, path, query));
     if (index < 0) return null;
-    const [rule] = faults.splice(index, 1);
+    const rule = faults[index];
+    if (!rule.sticky) faults.splice(index, 1);
     served.push({ rule, at: Date.now() });
     return rule.fault;
   }
@@ -569,9 +575,13 @@ export async function startFakeTap(opts: FakeTapOptions = {}, port = 0) {
   };
 
   /** Apply a fault, or return false to answer normally (after any delay). */
-  function injected(fault: Fault | null, req: IncomingMessage, res: ServerResponse, answer: () => void): boolean {
+  function injected(fault: Fault | null, req: IncomingMessage, res: ServerResponse, answer: () => void, reply: (edit?: (p: Record<string, unknown>) => unknown) => void): boolean {
     if (!fault) return false;
-    if ("dropAfterMs" in fault) setTimeout(() => req.socket.destroy(), fault.dropAfterMs);
+    if ("body" in fault) {
+      res.writeHead(fault.status ?? 200, { "Content-Type": "application/json" });
+      res.end(fault.body);
+    } else if ("edit" in fault) reply(fault.edit);
+    else if ("dropAfterMs" in fault) setTimeout(() => req.socket.destroy(), fault.dropAfterMs);
     else if ("delayMs" in fault) setTimeout(answer, fault.delayMs);
     else if (fault.status === 429) send(res, 429, { error: "Rate limit exceeded" }, { "Retry-After": String(fault.retryAfter) });
     else send(res, fault.status, { error: REFUSAL[fault.status] ?? "Internal server error" });
@@ -589,9 +599,9 @@ export async function startFakeTap(opts: FakeTapOptions = {}, port = 0) {
       const auth = req.headers.authorization;
       requests.push({ method, path: url.pathname, query, auth, body, at: Date.now() });
       if (state.net.outage) return req.socket.destroy();
-      const reply = () => {
+      const reply = (edit?: (p: Record<string, unknown>) => unknown) => {
         const [status, payload] = auth === `Bearer ${NO_PLAN_KEY}` ? PLAN_REFUSAL : state.handle(method, url.pathname, query, body);
-        send(res, status, payload);
+        send(res, status, edit ? edit(payload as Record<string, unknown>) : payload);
       };
       const answer = () => {
         const deadline = Date.now() + state.waitSeconds(method, url.pathname, query) * 1000;
@@ -601,7 +611,7 @@ export async function startFakeTap(opts: FakeTapOptions = {}, port = 0) {
         };
         poll();
       };
-      if (!injected(state.takeFault(method, url.pathname, query), req, res, answer)) answer();
+      if (!injected(state.takeFault(method, url.pathname, query), req, res, answer, reply)) answer();
     });
   });
   await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));

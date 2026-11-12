@@ -8,7 +8,7 @@
 import {
   EXIT_CODE,
   isFinal,
-  readApprovalRequest,
+  readById,
   waitForAnswer,
   withdrawApprovalRequest,
   type ApprovalRequest,
@@ -70,6 +70,11 @@ export class StopRequest {
 
   press(): void {
     (this.first.signal.aborted ? this.second : this.first).abort();
+  }
+
+  /** Stop waiting and withdraw, as a first press does, but never escalate to quitting. For a stop the person did not press, such as their output closing. */
+  request(): void {
+    this.first.abort();
   }
 
   get requested(): boolean {
@@ -137,7 +142,7 @@ export async function settle(created: CreatedRequest, stop: StopRequest, view: S
 export async function follow(id: string, opts: { wait: boolean; stop: StopRequest; hooks?: RetryHooks }): Promise<{ ref: RequestRef; ending: Ending }> {
   let ref: RequestRef = { id, code: null, url: null, expires_at: null };
   try {
-    const first = await readApprovalRequest(id, 0, opts.stop.signal);
+    const first = await readById(id, { ...opts.hooks, signal: opts.stop.signal });
     ref = refOf(first);
     if (isFinal(first)) return { ref, ending: { kind: "answered", request: first } };
     if (!opts.wait) return { ref, ending: { kind: "open", request: first } };
