@@ -34,8 +34,12 @@ Sleep 2.5s
 Down
 Sleep 700ms
 Type "r"
-Sleep 3.5s
+Sleep 2s
+Screenshot .demo/approve-read.png
+Sleep 1.5s
 Type "r"
+Sleep 1s
+Screenshot .demo/approve-chooser.png
 Sleep 600ms
 Up
 Sleep 600ms

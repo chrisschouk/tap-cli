@@ -11,6 +11,8 @@ export interface RestRequestInit {
   method?: "GET" | "POST" | "PATCH" | "DELETE";
   body?: unknown;
   query?: Record<string, string | number | boolean | undefined>;
+  /** Abort the request after this long. A long-poll sets it above the time the server holds the read. */
+  timeoutMs?: number;
 }
 
 export class TapApiError extends Error {
@@ -19,6 +21,8 @@ export class TapApiError extends Error {
     message: string,
     /** The parsed JSON body, for routes whose refusal carries detail (a 422's per-pitch reasons). */
     public readonly body: unknown = null,
+    /** The Retry-After header in seconds, when a 429 or 503 carries one. */
+    public readonly retryAfterSeconds: number | null = null,
   ) {
     super(message);
     this.name = "TapApiError";
@@ -59,6 +63,14 @@ export async function fetchAllPages<T>(
   }
 }
 
+function apiUrl(path: string, query: RestRequestInit["query"]): URL {
+  const url = new URL(path.startsWith("/") ? path : `/${path}`, getTapUrl());
+  for (const [k, v] of Object.entries(query ?? {})) {
+    if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+  }
+  return url;
+}
+
 export async function restRequest<T = unknown>(
   path: string,
   init: RestRequestInit = {},
@@ -73,15 +85,7 @@ export async function restRequest<T = unknown>(
     throw new Error("TAP_API_KEY must start with tap_ak_");
   }
 
-  const base = getTapUrl();
-  const url = new URL(path.startsWith("/") ? path : `/${path}`, base);
-  if (init.query) {
-    for (const [k, v] of Object.entries(init.query)) {
-      if (v === undefined || v === null) continue;
-      url.searchParams.set(k, String(v));
-    }
-  }
-
+  const url = apiUrl(path, init.query);
   const res = await fetch(url.toString(), {
     method: init.method ?? "GET",
     headers: {
@@ -90,6 +94,7 @@ export async function restRequest<T = unknown>(
       "User-Agent": "@totalaudiopromo/tap-cli",
     },
     body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+    signal: init.timeoutMs ? AbortSignal.timeout(init.timeoutMs) : undefined,
   });
 
   const text = await res.text();
@@ -103,10 +108,19 @@ export async function restRequest<T = unknown>(
   }
 
   if (!res.ok) {
-    throw new TapApiError(res.status, errorMessage(json) || text || res.statusText, json);
+    throw new TapApiError(res.status, errorMessage(json) || text || res.statusText, json, retryAfter(res.headers.get("retry-after")));
   }
 
   return (json as T) ?? ({} as T);
+}
+
+/** Retry-After is either seconds or an HTTP date. */
+function retryAfter(header: string | null): number | null {
+  if (!header) return null;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds);
+  const at = Date.parse(header);
+  return Number.isNaN(at) ? null : Math.max(0, (at - Date.now()) / 1000);
 }
 
 /**

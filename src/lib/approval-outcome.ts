@@ -53,6 +53,17 @@ const STATUS: Record<Exclude<ApprovalStatus, "pending">, StatusCopy> = {
   superseded: { tone: "muted", line: "A newer request for the same pitches replaced this one.", next: "Answer the newer request in TAP." },
 };
 
+/** Answered, or stopped partway, with nothing approved: nothing will send. */
+const NONE_APPROVED: StatusCopy = {
+  tone: "warning",
+  line: "Every pitch was skipped. Nothing was approved or sent.",
+  next: "Fix the pitches in TAP, then ask again with tap approve {campaign}.",
+};
+
+function copyFor(status: Exclude<ApprovalStatus, "pending">, approved: number): StatusCopy {
+  return approved === 0 && (status === "partial" || status === "interrupted") ? NONE_APPROVED : STATUS[status];
+}
+
 export interface PitchLine {
   id: string;
   to: string | null;
@@ -101,8 +112,8 @@ export function describeOutcome(request: ApprovalRequest, campaignId?: string): 
   if (request.status === "pending") {
     return { status: "pending", tone: "muted", headline: "Waiting for an answer", line: null, pitches: pitchLines(request), next: `Check again with tap approve status ${request.id} --wait.` };
   }
-  const copy = STATUS[request.status];
   const approved = request.result?.approved.length ?? 0;
+  const copy = copyFor(request.status, approved);
   const lead = approved === 0 && copy.line;
   return {
     status: request.status,

@@ -9,7 +9,6 @@ import { join } from "node:path";
  * pitches; it does not send them. The approval-request routes ask a person,
  * read their answer and withdraw the ask; only a signed-in browser session can
  * answer (apps/tap/app/api/approval-requests/:id/answer, outside v1).
- * POST /pitches/:id/propose queues a draft for review and approves nothing.
  */
 const ALLOWED = new Set([
   "GET /api/v1/actions",
@@ -32,7 +31,6 @@ const ALLOWED = new Set([
   "GET /api/v1/outcomes",
   "POST /api/v1/outcomes",
   "GET /api/v1/outreach/queue",
-  "POST /api/v1/pitches/:id/propose",
   "GET /api/v1/skills",
   "GET /api/v1/skills/:id",
   "POST /api/v1/skills/:id/fork",

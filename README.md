@@ -300,9 +300,13 @@ tap approve <campaign-id> --all --no-wait --json   # for agents: return the requ
 tap approve status <request-id> --wait --json      # then wait for the answer
 ```
 
-While it waits, `o` opens the link on this computer and `c` or Ctrl+C withdraws the request. A request expires after 15 minutes. If nothing waits for approval but the campaign has drafts, `tap approve` offers to queue them for review first. Queueing approves nothing.
+While it waits, `o` opens the link on this computer and `c` or Ctrl+C withdraws the request. SIGTERM and SIGHUP withdraw it too. A request expires after 15 minutes. If nothing waits for approval but the campaign has drafts, `tap approve` lists them and prints the TAP page where you send them for approval.
 
-In the chooser, space chooses a pitch, `a` chooses all or none, `r` shows the whole pitch, and enter asks.
+If TAP stops answering while it waits (a dropped connection, a 5xx or a 429), `tap approve` keeps trying until the request expires, honouring Retry-After. If it still cannot reach TAP, it says the request was not withdrawn, prints its id, code and link, and the command that reads the answer later: `tap approve status <request-id> --wait`. With `--json` it prints `{ "id", "status": "unknown", "status_command" }`.
+
+In the chooser, space chooses a pitch, `a` chooses all or none, `r` shows the whole pitch, enter asks and `q` quits. The list scrolls, so a long campaign fits a small terminal. TAP lists who each pitch goes to once you ask, before the code; if one is wrong, `c` withdraws the request. The read view shows the subject and body; TAP adds the release block and the sender when it sends, and the approve page shows the whole email.
+
+TAP takes up to 50 pitches a request. Ask about more and `tap approve` asks about the first 50 and tells you how to ask about the rest once that request is answered.
 
 **Flags:**
 
@@ -313,7 +317,13 @@ In the chooser, space chooses a pitch, `a` chooses all or none, `r` shows the wh
 | `--no-wait` | Return once the request exists. Check it with `tap approve status <request-id>` |
 | `--json` | Print the request, or the answer with a per-pitch summary, as JSON |
 
-`tap approve` exits 1 when the request ends with nothing approved (declined, expired, withdrawn or replaced by a newer request), and 0 otherwise.
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | At least one pitch was approved, or the request still waits (`--no-wait`, `status` without `--wait`) |
+| 1 | Nothing was approved: declined, expired, every pitch skipped, replaced by a newer request, or TAP could not be reached |
+| 130 | You stopped it: Ctrl+C, `c` or `q`, or SIGTERM or SIGHUP. An open request is withdrawn first |
 
 ---
 

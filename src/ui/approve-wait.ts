@@ -10,14 +10,15 @@ import ora from "ora";
 import { renderUnicodeCompact } from "uqr";
 import { COLOUR, GLYPH } from "./theme.js";
 import { stripAnsi } from "./detail.js";
-import { onInterrupt } from "./interrupt.js";
+import { exitInterrupted, type InterruptHold } from "./interrupt.js";
 import {
-  cancelApprovalRequest,
   isFinal,
   waitForAnswer,
+  withdrawApprovalRequest,
   type ApprovalRequest,
   type CreatedRequest,
 } from "../lib/approval-requests.js";
+import type { RetryHooks } from "../lib/retry.js";
 
 const accent = chalk.hex(COLOUR.primary);
 const QR_GAP = 4;
@@ -71,11 +72,13 @@ export function printAsk(created: CreatedRequest, opts: { qr: boolean }): void {
 }
 
 interface WaitOptions {
-  /** Read `o` and `c` from a TTY. Otherwise only Ctrl+C (SIGINT) withdraws. */
+  /** Read `o` and `c` from a TTY. Otherwise only a signal withdraws. */
   keys: boolean;
   /** Draw the countdown. Off for --json, where stdout is the answer. */
   countdown: boolean;
   onOpen: () => void;
+  /** Taken before the request was created, so an earlier interrupt withdraws at once. */
+  hold: InterruptHold;
 }
 
 function waitingText(created: CreatedRequest, keys: boolean, note: string | null): string {
@@ -84,67 +87,99 @@ function waitingText(created: CreatedRequest, keys: boolean, note: string | null
   return `${status}${hint}`;
 }
 
+/** Retry notes as stderr lines, for reads made before the countdown starts. */
+export function retryLog(created: Pick<CreatedRequest, "expires_at">): RetryHooks {
+  return {
+    onRetry: (reason, delayMs) => console.error(`  ${retryNote(reason, delayMs, created)}`),
+    onRecover: () => console.error("  Back in touch with TAP."),
+  };
+}
+
+function retryNote(reason: string, delayMs: number, created: Pick<CreatedRequest, "expires_at">): string {
+  return `${reason}. Trying again in ${Math.ceil(delayMs / 1000)}s, until ${clockTime(created.expires_at)}`;
+}
+
+/** The countdown line. Without a spinner on screen, retry notes go to stderr as lines. */
+function waitingLine(created: CreatedRequest, opts: WaitOptions) {
+  let note: string | null = null;
+  const spinner = ora({ text: waitingText(created, opts.keys, note), prefixText: " ", spinner: "dots", isEnabled: opts.countdown && process.stdout.isTTY });
+  if (opts.countdown) spinner.start();
+  const render = () => (spinner.text = waitingText(created, opts.keys, note));
+  const tick = setInterval(render, 1000);
+  const log = (text: string) => (spinner.isSpinning ? undefined : console.error(`  ${text}`));
+  return {
+    note(text: string | null) {
+      note = text;
+      render();
+    },
+    hooks: {
+      onRetry: (reason: string, delayMs: number) => {
+        note = retryNote(reason, delayMs, created);
+        render();
+        log(note);
+      },
+      onRecover: () => {
+        note = null;
+        render();
+        log("Back in touch with TAP.");
+      },
+    },
+    stop() {
+      clearInterval(tick);
+      spinner.stop();
+    },
+  };
+}
+
+function listenForKeys(actions: Record<string, () => void>, onCtrlC: () => void): () => void {
+  const { stdin } = process;
+  const onKey = (_: string, key: { name?: string; ctrl?: boolean }) => {
+    if (key?.ctrl && key.name === "c") return onCtrlC();
+    actions[key?.name ?? ""]?.();
+  };
+  emitKeypressEvents(stdin);
+  stdin.setRawMode(true);
+  stdin.resume();
+  stdin.on("keypress", onKey);
+  return () => {
+    stdin.off("keypress", onKey);
+    stdin.setRawMode(false);
+    stdin.pause();
+  };
+}
+
 /**
  * Wait for the person's answer, or for a withdrawal the server accepts. A
  * withdrawal refused because someone is answering keeps waiting for them.
+ * A second interrupt while withdrawing exits at once.
  */
 export function awaitAnswer(created: CreatedRequest, opts: WaitOptions): Promise<ApprovalRequest> {
-  const { stdin } = process;
-  let note: string | null = null;
+  const line = waitingLine(created, opts);
   let cancelling = false;
   let done = false;
-  const spinner = ora({ text: waitingText(created, opts.keys, note), prefixText: " ", spinner: "dots", isEnabled: opts.countdown && process.stdout.isTTY });
-  if (opts.countdown) spinner.start();
-  const tick = setInterval(() => (spinner.text = waitingText(created, opts.keys, note)), 1000);
 
   return new Promise((resolve, reject) => {
-    const cleanup = () => {
+    const settle = <T>(fn: (value: T) => void) => (value: T) => {
+      if (done) return;
       done = true;
-      clearInterval(tick);
-      spinner.stop();
-      release();
-      if (!opts.keys) return;
-      stdin.off("keypress", onKey);
-      stdin.setRawMode(false);
-      stdin.pause();
+      line.stop();
+      stopKeys();
+      fn(value);
     };
-    const finish = (request: ApprovalRequest) => {
-      if (done) return;
-      cleanup();
-      resolve(request);
-    };
-    const fail = (err: unknown) => {
-      if (done) return;
-      cleanup();
-      reject(err);
-    };
-    function cancel() {
-      if (cancelling) {
-        process.stdout.write("\x1b[?25h");
-        process.exit(130);
-      }
+    const finish = settle(resolve);
+    const fail = settle(reject);
+    const cancel = () => {
+      if (cancelling) exitInterrupted();
       cancelling = true;
-      note = "Withdrawing the request";
-      spinner.text = waitingText(created, opts.keys, note);
-      cancelApprovalRequest(created.id).then((request) => {
+      line.note("Withdrawing the request");
+      withdrawApprovalRequest(created, line.hooks).then((request) => {
         if (isFinal(request)) return finish(request);
         cancelling = false;
-        note = "Someone is answering now. Waiting for their answer";
+        line.note("Someone is answering now. Waiting for their answer");
       }, fail);
-    }
-    const ACTIONS: Record<string, () => void> = { o: opts.onOpen, c: cancel };
-    function onKey(_: string, key: { name?: string; ctrl?: boolean }) {
-      if (key?.ctrl && key.name === "c") return cancel();
-      ACTIONS[key?.name ?? ""]?.();
-    }
-
-    const release = onInterrupt(cancel);
-    if (opts.keys) {
-      emitKeypressEvents(stdin);
-      stdin.setRawMode(true);
-      stdin.resume();
-      stdin.on("keypress", onKey);
-    }
-    waitForAnswer(created.id, () => done).then(finish, fail);
+    };
+    const stopKeys = opts.keys ? listenForKeys({ o: opts.onOpen, c: opts.hold.trigger }, opts.hold.trigger) : () => {};
+    opts.hold.handle(cancel);
+    waitForAnswer(created, { ...line.hooks, stopped: () => done }).then(finish, fail);
   });
 }

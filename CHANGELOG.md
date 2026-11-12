@@ -12,8 +12,16 @@ New `tap approve <campaign-id>` asks a signed-in person to approve pitches and w
   reason, and what to do next.
 - `--json` and `--no-wait` let an agent create the request and come back later with
   `tap approve status <request-id> --wait`.
-- When nothing waits for approval but drafts exist, offers to queue them for review. Queueing
-  approves nothing.
+- When nothing waits for approval but drafts exist, lists them and links to the TAP page where
+  you send them for approval.
+- Rides out a dropped connection, a 5xx or a 429 (honouring Retry-After) until the request
+  expires. If TAP stays unreachable it says the request was not withdrawn and prints the id,
+  code, link and `tap approve status <id> --wait`; `--json` gives `status: "unknown"`.
+- Ctrl+C, SIGTERM and SIGHUP withdraw the request, including one still being created.
+- Exits 0 when anything was approved, 1 when nothing was, 130 when you stopped it.
+- The chooser scrolls, says who pitches go to once TAP lists them, and says what the read view
+  leaves out. More than 50 pitches: asks about the first 50 and says how to ask about the rest.
+- Added to the bare `tap` menu.
 - The CLI still never approves or sends: the key can only create, read and withdraw a request.
 - `tap send` points at `tap approve`, and `tap auth login` lists the `agents:write` and
   `agents:read` scopes it needs.

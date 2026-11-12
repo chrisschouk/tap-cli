@@ -25,19 +25,37 @@ export const PENDING_STATE_LABEL: Record<PendingState, string> = {
   held_for_payment: "approved, held for payment",
 };
 
+/** Who a pitch goes to, when the pitches route says. */
+export interface Recipient {
+  to: string | null;
+  name: string | null;
+  outlet: string | null;
+}
+
 export interface PendingPitch {
   id: string;
   subject: string;
   body: string | null;
+  recipient: Recipient | null;
   state: PendingState;
   scheduledFor: string | null;
 }
 
+/** `to`, `contact_name` and `outlet` are coming to GET /campaigns/:id/pitches; read them once they arrive. */
 interface CampaignPitchRow {
   id: string;
   title: string | null;
   subject: string | null;
   body?: string | null;
+  to?: string | null;
+  contact_name?: string | null;
+  outlet?: string | null;
+}
+
+function recipientOf(row: CampaignPitchRow | undefined): Recipient | null {
+  if (!row) return null;
+  const recipient = { to: row.to ?? null, name: row.contact_name ?? null, outlet: row.outlet ?? null };
+  return Object.values(recipient).some(Boolean) ? recipient : null;
 }
 
 export interface OutreachQueueRow {
@@ -74,6 +92,7 @@ export function toPendingPitches(
       id: row.id,
       subject: pitch?.subject || pitch?.title || "No subject",
       body: pitch?.body ?? null,
+      recipient: recipientOf(pitch),
       state,
       scheduledFor: row.scheduled_for,
     });

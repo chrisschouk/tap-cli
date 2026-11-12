@@ -11,6 +11,9 @@ import type { Recorded, startFakeTap } from "./fake-tap.js";
 
 type FakeTap = Awaited<ReturnType<typeof startFakeTap>>;
 
+/** One node process with tsx loaded in it, so signals reach the CLI itself (the tsx wrapper relays only SIGINT and SIGTERM). */
+const CLI = ["--import", "tsx", "src/cli.ts"];
+
 export function freshHome(config?: object): string {
   const home = mkdtempSync(join(tmpdir(), "tap-cli-"));
   if (config) {
@@ -37,7 +40,7 @@ export interface RunResult {
 export function runTap(server: FakeTap, args: string[], opts: RunOptions = {}): Promise<RunResult> {
   const before = server.requests.length;
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [join(process.cwd(), "node_modules/tsx/dist/cli.mjs"), "src/cli.ts", ...args], {
+    const child = spawn(process.execPath, [...CLI, ...args], {
       env: {
         PATH: process.env.PATH,
         HOME: freshHome(),
@@ -56,5 +59,24 @@ export function runTap(server: FakeTap, args: string[], opts: RunOptions = {}): 
     child.on("close", (code) =>
       resolve({ code: code ?? 1, stdout, stderr, output: stdout + stderr, calls: server.requests.slice(before) }),
     );
+  });
+}
+
+export type PtyStep = { wait: string } | { send: string };
+
+/** Run the CLI in a pseudo-terminal of `rows` by `cols`, typing keys as each awaited text appears. */
+export function runTapPty(server: FakeTap, args: string[], steps: PtyStep[], size = { rows: 24, cols: 100 }): Promise<RunResult> {
+  const before = server.requests.length;
+  const cli = [process.execPath, ...CLI, ...args];
+  return new Promise((resolve) => {
+    const child = spawn("python3", ["-I", join(process.cwd(), "src/__tests__/pty-driver.py"), String(size.rows), String(size.cols), "--", ...cli], {
+      env: { PATH: process.env.PATH, HOME: freshHome(), NO_COLOR: "1", TERM: "xterm-256color", TAP_API_KEY: "tap_ak_test", TAP_URL: server.url },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.stdin.end(JSON.stringify(steps));
+    child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr, output: stdout + stderr, calls: server.requests.slice(before) }));
   });
 }

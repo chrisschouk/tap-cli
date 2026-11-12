@@ -170,7 +170,7 @@ export function createRailSpinner(text: string) {
     },
     fail(msg: string) {
       spinner.stop();
-      console.log(`  ${chalk.red(GLYPH.cross)} ${msg}`);
+      console.error(`  ${chalk.red(GLYPH.cross)} ${msg}`);
     },
     stop() {
       spinner.stop();

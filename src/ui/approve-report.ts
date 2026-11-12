@@ -8,7 +8,8 @@ import * as out from "../output.js";
 import { COLOUR, GLYPH } from "./theme.js";
 import { blank, summaryBar } from "./format.js";
 import { describeOutcome, rejectionLabel, type Outcome, type Tone } from "../lib/approval-outcome.js";
-import type { ApprovalRequest, RejectedPitch } from "../lib/approval-requests.js";
+import type { ApprovalRequest, CreatedRequest, RejectedPitch } from "../lib/approval-requests.js";
+import type { LostTouch } from "../lib/retry.js";
 
 /** Recipient email to outlet, from the campaign's contacts. */
 export type Outlets = ReadonlyMap<string, string>;
@@ -102,9 +103,40 @@ export function printRejected(rejected: RejectedPitch[], subjects: ReadonlyMap<s
   );
   blank();
   out.info("Nothing was asked. Only pitches waiting for approval can go in a request.");
-  out.info("Queue drafts for review in TAP, or ask about the others on their own.");
+  out.info("Send drafts for approval in TAP, or ask about the others on their own.");
 }
 
 export function rejectedJson(rejected: RejectedPitch[]) {
   return { error: "Some pitches cannot be approved now", rejected: rejected.map((r) => ({ ...r, label: rejectionLabel(r) })) };
+}
+
+const statusCommand = (id: string) => `tap approve status ${id} --wait`;
+
+function clock(iso: string): string {
+  return new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+}
+
+/** Under --json: the request, its status unknown, and the command that reads it. */
+export function lostTouchJson(created: CreatedRequest, err: LostTouch) {
+  const { id, code, url, expires_at } = created;
+  return { id, code, url, expires_at, status: "unknown", error: err.reason, status_command: statusCommand(id) };
+}
+
+/** The CLI stopped trying to reach TAP. The request was not withdrawn, so say where it stands and how to read it. */
+export function printLostTouch(created: CreatedRequest, err: LostTouch, opts: { interrupted: boolean }): void {
+  const open = Date.parse(created.expires_at) > Date.now();
+  blank();
+  out.error(`${err.reason}. ${opts.interrupted ? "Could not withdraw the request." : "Stopped waiting for the answer."}`);
+  console.error(
+    open
+      ? `    The request is still open until ${clock(created.expires_at)}. A person can still approve it, and TAP sends what they approve.`
+      : `    The request was open until ${clock(created.expires_at)}. A person may have approved it before then, and TAP sends what they approved.`,
+  );
+  blank();
+  for (const [label, value] of [["Request", created.id], ["Code", created.code], ["Link", created.url]]) {
+    console.log(`  ${chalk.dim(label.padEnd(9))}${value}`);
+  }
+  blank();
+  out.info(`Read the answer with ${statusCommand(created.id)}`);
+  blank();
 }

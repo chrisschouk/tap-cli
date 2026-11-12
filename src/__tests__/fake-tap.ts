@@ -9,8 +9,13 @@
  * refuses with 422 unless every pitch waits for approval, GET holds the
  * connection for up to `?wait` seconds (max 25) while pending and reads as
  * expired past the deadline, and cancel answers 409 with the request once a
- * person has started answering. Tests answer through `answerApproval`, which
- * stands in for the signed-in person on the approve page.
+ * person has started answering, holding that 409 for up to 25 seconds while
+ * their answer finishes. Tests answer through `answerApproval`, which stands
+ * in for the signed-in person on the approve page.
+ *
+ * `faults` and `outage` model what a long wait meets: a 429 with Retry-After
+ * (the v1 rate limit, lib/api/api-key-auth.ts rateLimitHeaders), a 5xx blip,
+ * a connection dropped mid-wait, a slow response, or TAP unreachable.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -22,6 +27,21 @@ export interface Recorded {
   query: Record<string, string>;
   auth: string | undefined;
   body: unknown;
+  /** Epoch ms the request arrived. */
+  at: number;
+}
+
+/** One injected failure, used by the first request whose method and path match. */
+export type Fault =
+  | { status: 429; retryAfter: number }
+  | { status: 500 | 502 | 503 }
+  | { dropAfterMs: number }
+  | { delayMs: number };
+
+export interface FaultRule {
+  method: string;
+  path: RegExp;
+  fault: Fault;
 }
 
 interface Contact {
@@ -186,11 +206,29 @@ function matches(c: Contact, search: string): boolean {
 export interface FakeTapOptions {
   contacts?: number;
   sentPitches?: number;
+  /** Extra pitches waiting for approval, after the three named ones. */
+  extraWaiting?: number;
+  /** Give GET /campaigns/:id/pitches the recipient fields the TAP change will add. */
+  pitchRecipients?: boolean;
+}
+
+function extraWaitingRows(count: number, after: number): QueueRow[] {
+  return Array.from({ length: count }, (_, i) => ({
+    id: uuid(0xb1, i + 1),
+    subject: `Pitch ${String(i + 1).padStart(2, "0")} for ${named(i + 3).outlet}`,
+    body: BODY(named(i + 3).name),
+    to: named(i + 3).email,
+    state: "pending_approval",
+    send_status: "draft",
+    scheduled_for: null,
+    updated_at: iso(after + i),
+  }));
 }
 
 export function fakeTapState(opts: FakeTapOptions = {}, appUrl = "https://totalaudiopromo.com") {
   const contacts = seedContacts(opts.contacts ?? 230);
   const queue = seedQueue(opts.sentPitches ?? 220);
+  queue.push(...extraWaitingRows(opts.extraWaiting ?? 0, queue.length));
   const campaignContacts = [
     { contact: contacts[0], pitch_status: "not_started" },
     { contact: contacts[1], pitch_status: "not_pitched" },
@@ -273,10 +311,17 @@ export function fakeTapState(opts: FakeTapOptions = {}, appUrl = "https://totala
     return [200, { items, total: rows.length, page, limit }];
   };
 
+  const recipientFields = (r: QueueRow) => {
+    if (!opts.pitchRecipients) return {};
+    const contact = contacts.find((c) => c.email === r.to);
+    return { to: r.to, contact_name: contact?.name ?? null, outlet: contact?.outlet ?? null };
+  };
+
   const campaignPitches: Handler = () => [
     200,
     {
       pitches: queue.map((r) => ({
+        ...recipientFields(r),
         id: r.id,
         title: null,
         subject: r.subject,
@@ -408,22 +453,10 @@ export function fakeTapState(opts: FakeTapOptions = {}, appUrl = "https://totala
     return { approved, skipped: Object.entries(skip).map(([id, reason]) => ({ id, reason })) };
   }
 
-  /** POST /pitches/:id/propose: a draft with a recipient moves to pending_approval; nothing approves. */
-  const proposeDraft: Handler = ({ params, body }) => {
-    const reason = (body as { reason?: string } | undefined)?.reason ?? "";
-    if (reason.trim().length < 8) return [400, { error: "reason is required (at least 8 characters)" }];
-    const row = queue.find((r) => r.id === params[0]);
-    if (!row) return [404, { error: "Pitch draft not found in this workspace" }];
-    if (!row.to) return [409, { error: "The pitch needs one saved, attached recipient before it can be proposed." }];
-    row.state = "pending_approval";
-    return [200, { ok: true, pitch_id: row.id, campaign: CAMPAIGN.name, approval_state: "pending_approval", scheduled_at: null, message: "Proposal queued for human review." }];
-  };
-
   const routes: Array<[string, RegExp, Handler]> = [
     ["POST", /^\/api\/v1\/approval-requests$/, createApproval],
     ["GET", /^\/api\/v1\/approval-requests\/([^/]+)$/, readApproval],
     ["POST", /^\/api\/v1\/approval-requests\/([^/]+)\/cancel$/, cancelApproval],
-    ["POST", /^\/api\/v1\/pitches\/([^/]+)\/propose$/, proposeDraft],
     ["GET", /^\/api\/v1\/campaigns$/, ({ query }) => {
       const rows = query.status ? [CAMPAIGN].filter((c) => c.status === query.status) : [CAMPAIGN];
       const { rows: pageRows, page, limit } = pageOf(rows, query);
@@ -470,45 +503,84 @@ export function fakeTapState(opts: FakeTapOptions = {}, appUrl = "https://totala
     return [404, { error: "Not found" }];
   }
 
-  /** GET ?wait holds a pending request open, polling each 100 ms (the route polls each second). */
-  function waitSeconds(method: string, path: string, query: Record<string, string>): number {
-    const match = method === "GET" ? /^\/api\/v1\/approval-requests\/([^/]+)$/.exec(path) : null;
+  const APPROVAL_PATH = /^\/api\/v1\/approval-requests\/([^/]+)(\/cancel)?$/;
+
+  /**
+   * The request a call holds open: a GET while it is pending, or a cancel
+   * while a person is answering (the cancel route's settledRow).
+   */
+  function heldApproval(method: string, path: string): FakeApproval | undefined {
+    const match = APPROVAL_PATH.exec(path);
     const a = match ? approvals.get(match[1]) : undefined;
-    if (!a || expireIfDue(a).status !== "pending") return 0;
+    if (!a || expireIfDue(a).status !== "pending") return undefined;
+    if (match![2]) return method === "POST" && a.answered_at ? a : undefined;
+    return method === "GET" ? a : undefined;
+  }
+
+  /** How long to hold the call. The fake polls each 100 ms; the routes poll each second. */
+  function waitSeconds(method: string, path: string, query: Record<string, string>): number {
+    if (!heldApproval(method, path)) return 0;
+    if (path.endsWith("/cancel")) return 25;
     const raw = Number(query.wait ?? 0);
     return Number.isFinite(raw) ? Math.min(25, Math.max(0, Math.floor(raw))) : 0;
   }
 
-  function stillPending(path: string): boolean {
-    const a = approvals.get(path.split("/").pop() ?? "");
-    return Boolean(a && expireIfDue(a).status === "pending");
+  const stillHeld = (method: string, path: string) => Boolean(heldApproval(method, path));
+
+  const faults: FaultRule[] = [];
+  const net = { outage: false };
+
+  function takeFault(method: string, path: string): Fault | null {
+    const index = faults.findIndex((f) => f.method === method && f.path.test(path));
+    return index < 0 ? null : faults.splice(index, 1)[0].fault;
   }
 
-  return { contacts, queue, approvals, approvalCtl, answerApproval, handle, waitSeconds, stillPending };
+  return { contacts, queue, approvals, approvalCtl, answerApproval, handle, waitSeconds, stillHeld, faults, net, takeFault };
 }
 
 export async function startFakeTap(opts: FakeTapOptions = {}, port = 0) {
   const requests: Recorded[] = [];
   let state: ReturnType<typeof fakeTapState>;
 
+  const send = (res: ServerResponse, status: number, payload: unknown, headers: Record<string, string> = {}) => {
+    res.writeHead(status, { "Content-Type": "application/json", ...headers });
+    res.end(JSON.stringify(payload));
+  };
+
+  /** Apply a fault, or return false to answer normally (after any delay). */
+  function injected(fault: Fault | null, req: IncomingMessage, res: ServerResponse, answer: () => void): boolean {
+    if (!fault) return false;
+    if ("dropAfterMs" in fault) setTimeout(() => req.socket.destroy(), fault.dropAfterMs);
+    else if ("delayMs" in fault) setTimeout(answer, fault.delayMs);
+    else if (fault.status === 429) send(res, 429, { error: "Rate limit exceeded" }, { "Retry-After": String(fault.retryAfter) });
+    else send(res, fault.status, { error: "Internal server error" });
+    return true;
+  }
+
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     let raw = "";
     req.on("data", (chunk) => (raw += chunk));
     req.on("end", () => {
       const url = new URL(req.url ?? "/", "http://localhost");
+      const method = req.method ?? "";
       const query = Object.fromEntries(url.searchParams);
       const body = raw ? JSON.parse(raw) : undefined;
       const auth = req.headers.authorization;
-      requests.push({ method: req.method ?? "", path: url.pathname, query, auth, body });
+      requests.push({ method, path: url.pathname, query, auth, body, at: Date.now() });
+      if (state.net.outage) return req.socket.destroy();
       const reply = () => {
-        const [status, payload] =
-          auth === `Bearer ${NO_PLAN_KEY}` ? PLAN_REFUSAL : state.handle(req.method ?? "", url.pathname, query, body);
-        res.writeHead(status, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(payload));
+        const [status, payload] = auth === `Bearer ${NO_PLAN_KEY}` ? PLAN_REFUSAL : state.handle(method, url.pathname, query, body);
+        send(res, status, payload);
       };
-      const deadline = Date.now() + state.waitSeconds(req.method ?? "", url.pathname, query) * 1000;
-      const poll = () => (Date.now() < deadline && state.stillPending(url.pathname) && !req.socket.destroyed ? setTimeout(poll, 100) : reply());
-      poll();
+      const answer = () => {
+        const deadline = Date.now() + state.waitSeconds(method, url.pathname, query) * 1000;
+        const poll = () => {
+          if (state.net.outage) return req.socket.destroy();
+          return Date.now() < deadline && state.stillHeld(method, url.pathname) && !req.socket.destroyed ? setTimeout(poll, 100) : reply();
+        };
+        poll();
+      };
+      if (!injected(state.takeFault(method, url.pathname), req, res, answer)) answer();
     });
   });
   await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));

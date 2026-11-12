@@ -7,10 +7,21 @@
  */
 
 import { restRequest, TapApiError } from "./rest.js";
+import { retrying, type RetryHooks } from "./retry.js";
 
-/** The server takes at most 50 pitches per request and holds a read open for at most 25 seconds. */
+/** The server takes at most 50 pitches per request and holds a read (or a refused cancel) open for at most 25 seconds. */
 export const MAX_REQUEST_PITCHES = 50;
 const MAX_WAIT_SECONDS = 25;
+const HELD_TIMEOUT_MS = (MAX_WAIT_SECONDS + 20) * 1000;
+/** How long Ctrl+C keeps trying to withdraw before saying the request is still open. */
+const WITHDRAW_RETRY_MS = 30_000;
+
+/**
+ * 0 when at least one pitch was approved (or the request still waits: --no-wait,
+ * status without --wait), 1 when nothing was approved, 130 when the person
+ * interrupted (Ctrl+C, c, q, SIGTERM, SIGHUP).
+ */
+export const EXIT_CODE = { approved: 0, notApproved: 1, interrupted: 130 } as const;
 
 export type ApprovalStatus =
   | "pending"
@@ -71,17 +82,24 @@ export async function createApprovalRequest(pitchIds: string[]): Promise<Created
 }
 
 export function readApprovalRequest(id: string, waitSeconds = 0): Promise<ApprovalRequest> {
-  return restRequest<ApprovalRequest>(`/api/v1/approval-requests/${encodeURIComponent(id)}`, { query: { wait: Math.min(waitSeconds, MAX_WAIT_SECONDS) } });
+  return restRequest<ApprovalRequest>(`/api/v1/approval-requests/${encodeURIComponent(id)}`, {
+    query: { wait: Math.min(waitSeconds, MAX_WAIT_SECONDS) },
+    timeoutMs: HELD_TIMEOUT_MS,
+  });
 }
 
 /**
  * Withdraw a request. The server refuses with 409 once a person has started
- * answering or the request is final, and returns the request as it stands;
- * both outcomes come back here as the request.
+ * answering or the request is final; it holds that 409 for up to 25 seconds
+ * while the answer finishes, then returns the request as it stands. Both
+ * outcomes come back here as the request.
  */
 export async function cancelApprovalRequest(id: string): Promise<ApprovalRequest> {
   try {
-    return await restRequest<ApprovalRequest>(`/api/v1/approval-requests/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+    return await restRequest<ApprovalRequest>(`/api/v1/approval-requests/${encodeURIComponent(id)}/cancel`, {
+      method: "POST",
+      timeoutMs: HELD_TIMEOUT_MS,
+    });
   } catch (err) {
     const request = err instanceof TapApiError && err.status === 409 && (err.body as { request?: ApprovalRequest })?.request;
     if (request) return request;
@@ -93,20 +111,34 @@ export function isFinal(request: Pick<ApprovalRequest, "status">): boolean {
   return request.status !== "pending";
 }
 
+type Deadline = Pick<CreatedRequest, "id" | "expires_at">;
+
 /**
  * Long-poll until the request leaves pending, or `stopped()` turns true (the
- * last read is returned then). The server closes a request as expired once
- * its deadline passes, so this ends on its own.
+ * last read is returned then). Transient failures are retried until the
+ * request expires; past that, LostTouch. The server closes a request as
+ * expired once its deadline passes, so this ends on its own.
  */
-export async function waitForAnswer(id: string, stopped: () => boolean = () => false): Promise<ApprovalRequest> {
+export async function waitForAnswer(request: Deadline, opts: RetryHooks & { stopped?: () => boolean } = {}): Promise<ApprovalRequest> {
+  const until = Date.parse(request.expires_at);
   for (;;) {
-    const request = await readApprovalRequest(id, MAX_WAIT_SECONDS);
-    if (isFinal(request) || stopped()) return request;
+    const read = await retrying(() => readApprovalRequest(request.id, MAX_WAIT_SECONDS), { ...opts, until });
+    if (isFinal(read) || opts.stopped?.()) return read;
   }
 }
 
-/** 1 when the request is final and nothing approved; 0 while it waits or once anything approved. */
-export function exitCodeFor(request: Pick<ApprovalRequest, "status" | "result">): number {
-  if (!isFinal(request)) return 0;
-  return (request.result?.approved.length ?? 0) > 0 ? 0 : 1;
+/** Read once, retrying transient failures until the request expires. */
+export function readWithRetry(request: Deadline, hooks: RetryHooks = {}): Promise<ApprovalRequest> {
+  return retrying(() => readApprovalRequest(request.id), { ...hooks, until: Date.parse(request.expires_at) });
+}
+
+/** Withdraw, retrying transient failures for a short while. LostTouch means the request is still open. */
+export function withdrawApprovalRequest(request: Deadline, hooks: RetryHooks = {}): Promise<ApprovalRequest> {
+  const until = Math.min(Date.parse(request.expires_at), Date.now() + WITHDRAW_RETRY_MS);
+  return retrying(() => cancelApprovalRequest(request.id), { ...hooks, until });
+}
+
+export function exitCodeFor(request: Pick<ApprovalRequest, "status" | "result">, opts: { interrupted?: boolean } = {}): number {
+  if (!isFinal(request) || (request.result?.approved.length ?? 0) > 0) return EXIT_CODE.approved;
+  return opts.interrupted && request.status === "cancelled" ? EXIT_CODE.interrupted : EXIT_CODE.notApproved;
 }
