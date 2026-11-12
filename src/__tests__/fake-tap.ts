@@ -4,6 +4,19 @@
  * total-audio-platform/apps/tap/app/api/v1 (select lists, `limit` clamped to
  * 200, `updated_at desc` ordering on the outreach queue, 500 contacts per
  * import, 200 contact ids per campaign link, results capped at 100).
+ *
+ * Approval requests follow apps/tap/app/api/v1/approval-requests: POST
+ * refuses with 422 unless every pitch waits for approval, GET holds the
+ * connection for up to `?wait` seconds (max 25) while pending and reads as
+ * expired past the deadline, and cancel answers 409 with the request once a
+ * person has started answering, holding that 409 for up to 25 seconds while
+ * their answer finishes. Tests answer through `answerApproval`, which stands
+ * in for the signed-in person on the approve page.
+ *
+ * `faults` and `outage` model what a long wait meets: a 429 with Retry-After
+ * (the v1 rate limit, lib/api/api-key-auth.ts rateLimitHeaders), a 5xx blip,
+ * a connection dropped mid-wait, a slow response, a key refused mid-wait
+ * (401, 403), or TAP unreachable.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -15,6 +28,37 @@ export interface Recorded {
   query: Record<string, string>;
   auth: string | undefined;
   body: unknown;
+  /** Epoch ms the request arrived. */
+  at: number;
+}
+
+/** One injected failure, used by the first request whose method and path match. */
+export type Fault =
+  | { status: 429; retryAfter: number }
+  | { status: 500 | 502 | 503 }
+  /** The v1 gate refusing the key mid-wait: revoked (401) or scope removed (403). */
+  | { status: 401 | 403 }
+  | { dropAfterMs: number }
+  | { delayMs: number }
+  /** Answer at once with this body verbatim: empty, not JSON, a proxy's page. */
+  | { body: string; status?: number }
+  /** Answer at once, with the payload as `edit` returns it. */
+  | { edit: (payload: Record<string, unknown>) => unknown };
+
+export interface FaultRule {
+  method: string;
+  path: RegExp;
+  /** Match only requests carrying these query values, such as the long poll's `wait: "25"`. */
+  query?: Record<string, string>;
+  fault: Fault;
+  /** Serve this fault to every matching request, not just the first. */
+  sticky?: boolean;
+}
+
+/** A fault as the fake served it, with the fake's own clock. */
+export interface Served {
+  rule: FaultRule;
+  at: number;
 }
 
 interface Contact {
@@ -37,6 +81,8 @@ interface Contact {
 interface QueueRow {
   id: string;
   subject: string;
+  body: string;
+  to: string | null;
   state: string;
   send_status: string;
   scheduled_for: string | null;
@@ -44,6 +90,23 @@ interface QueueRow {
 }
 
 type Reply = [number, unknown];
+
+export type ApprovalAnswer = "decline" | "claim" | { skip?: Record<string, string> };
+
+interface FakeApproval {
+  id: string;
+  code: string;
+  status: string;
+  items: Array<{ pitch_id: string; to: string | null; subject: string | null }>;
+  result: { approved: string[]; skipped: Array<{ id: string; reason: string }> } | null;
+  created_at: string;
+  expires_at: string;
+  answered_at: string | null;
+  answered_via: string | null;
+}
+
+const UUID = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+const CODES = ["K7QM", "H4TW", "R9PX", "B3NV", "Z6CJ"];
 type Handler = (req: { query: Record<string, string>; body: unknown; params: string[] }) => Reply;
 
 export const CAMPAIGN_ID = "0b6f7a52-1c1d-4e0a-9d3e-5a1f2c3b4d5e";
@@ -80,12 +143,21 @@ function iso(minutesAgo: number): string {
   return new Date(Date.UTC(2026, 10, 11, 12, 0) - minutesAgo * 60_000).toISOString();
 }
 
+const NAMED = [
+  { name: "Jo Presenter", email: "jo@bbc.co.uk", outlet: "BBC Radio 6 Music" },
+  { name: "Maya Okafor", email: "maya@nts.live", outlet: "NTS Radio" },
+  { name: "Dev Shah", email: "dev@worldwidefm.net", outlet: "Worldwide FM" },
+];
+
+const BODY = (name: string) =>
+  `Hi ${name},\n\nNight Drive is the new single from sadact, out 1 December. It is a slow, late-night track built around a looped Rhodes and a drum machine.\n\nI think it would sit well on your show. Happy to send stems or a clean edit.\n\nThanks,\nChris`;
+
+const named = (i: number) => NAMED[i] ?? { name: `Contact ${i + 1}`, email: `contact${i + 1}@example.com`, outlet: `Outlet ${i + 1}` };
+
 function seedContacts(count: number): Contact[] {
   return Array.from({ length: count }, (_, i) => ({
     id: uuid(0xc0, i + 1),
-    name: i === 0 ? "Jo Presenter" : `Contact ${i + 1}`,
-    email: i === 0 ? "jo@bbc.co.uk" : `contact${i + 1}@example.com`,
-    outlet: i === 0 ? "BBC Radio 6 Music" : `Outlet ${i + 1}`,
+    ...named(i),
     role: i === 0 ? "presenter" : null,
     pipeline_status: "new",
     enriched: i % 3 === 0,
@@ -107,17 +179,31 @@ function seedQueue(sent: number): QueueRow[] {
   const sentRows = Array.from({ length: sent }, (_, i) => ({
     id: uuid(0xa0, i + 1),
     subject: `Sent pitch ${i + 1}`,
+    body: "",
+    to: null,
     state: "sent",
     send_status: "sent",
     scheduled_for: null,
     updated_at: iso(i),
   }));
+  const row = (n: number, subject: string, state: string, send_status: string, to: number | null, scheduled_for: string | null = null): QueueRow => ({
+    id: uuid(0xb0, n),
+    subject,
+    body: to === null ? "" : BODY(NAMED[to].name.split(" ")[0]),
+    to: to === null ? null : NAMED[to].email,
+    state,
+    send_status,
+    scheduled_for,
+    updated_at: iso(sent + n),
+  });
   const waiting: QueueRow[] = [
-    { id: uuid(0xb0, 1), subject: "Night Drive for your Friday show", state: "pending_approval", send_status: "draft", scheduled_for: null, updated_at: iso(sent + 1) },
-    { id: uuid(0xb0, 2), subject: "Approved already", state: "approved", send_status: "draft", scheduled_for: "2026-11-12T09:00:00Z", updated_at: iso(sent + 2) },
-    { id: uuid(0xb0, 3), subject: "Gmail refused this one", state: "approved", send_status: "failed", scheduled_for: null, updated_at: iso(sent + 3) },
-    { id: uuid(0xb0, 4), subject: "Waiting on the release pack", state: "approved", send_status: "held_for_payment", scheduled_for: null, updated_at: iso(sent + 4) },
-    { id: uuid(0xb0, 5), subject: "Still a draft", state: "draft", send_status: "draft", scheduled_for: null, updated_at: iso(sent + 5) },
+    row(1, "Night Drive for your Friday show", "pending_approval", "draft", 0),
+    row(2, "Approved already", "approved", "draft", null, "2026-11-12T09:00:00Z"),
+    row(3, "Gmail refused this one", "approved", "failed", null),
+    row(4, "Waiting on the release pack", "approved", "held_for_payment", null),
+    row(5, "Still a draft", "draft", "draft", 1),
+    row(6, "Night Drive, a late one for NTS", "pending_approval", "draft", 1),
+    row(7, "New sadact single for Worldwide FM", "pending_approval", "draft", 2),
   ];
   return [...sentRows, ...waiting];
 }
@@ -137,11 +223,29 @@ function matches(c: Contact, search: string): boolean {
 export interface FakeTapOptions {
   contacts?: number;
   sentPitches?: number;
+  /** Extra pitches waiting for approval, after the three named ones. */
+  extraWaiting?: number;
+  /** Give GET /campaigns/:id/pitches the recipient fields the TAP change will add. */
+  pitchRecipients?: boolean;
 }
 
-export function fakeTapState(opts: FakeTapOptions = {}) {
+function extraWaitingRows(count: number, after: number): QueueRow[] {
+  return Array.from({ length: count }, (_, i) => ({
+    id: uuid(0xb1, i + 1),
+    subject: `Pitch ${String(i + 1).padStart(2, "0")} for ${named(i + 3).outlet}`,
+    body: BODY(named(i + 3).name),
+    to: named(i + 3).email,
+    state: "pending_approval",
+    send_status: "draft",
+    scheduled_for: null,
+    updated_at: iso(after + i),
+  }));
+}
+
+export function fakeTapState(opts: FakeTapOptions = {}, appUrl = "https://totalaudiopromo.com") {
   const contacts = seedContacts(opts.contacts ?? 230);
   const queue = seedQueue(opts.sentPitches ?? 220);
+  queue.push(...extraWaitingRows(opts.extraWaiting ?? 0, queue.length));
   const campaignContacts = [
     { contact: contacts[0], pitch_status: "not_started" },
     { contact: contacts[1], pitch_status: "not_pitched" },
@@ -224,14 +328,21 @@ export function fakeTapState(opts: FakeTapOptions = {}) {
     return [200, { items, total: rows.length, page, limit }];
   };
 
+  const recipientFields = (r: QueueRow) => {
+    if (!opts.pitchRecipients) return {};
+    const contact = contacts.find((c) => c.email === r.to);
+    return { to: r.to, contact_name: contact?.name ?? null, outlet: contact?.outlet ?? null };
+  };
+
   const campaignPitches: Handler = () => [
     200,
     {
       pitches: queue.map((r) => ({
+        ...recipientFields(r),
         id: r.id,
         title: null,
         subject: r.subject,
-        body: "",
+        body: r.body,
         source: "api",
         voice_profile_id: null,
         send_status: r.send_status,
@@ -244,7 +355,124 @@ export function fakeTapState(opts: FakeTapOptions = {}) {
     },
   ];
 
+  const approvals = new Map<string, FakeApproval>();
+  const approvalCtl = { ttlMs: 15 * 60_000 };
+
+  const publicRequest = (a: FakeApproval) => {
+    const final = a.status !== "pending";
+    return {
+      id: a.id,
+      code: a.code,
+      status: a.status,
+      url: `${appUrl}/approve/${a.id}`,
+      origin: "cli",
+      item_count: a.items.length,
+      items: a.items,
+      result: a.result,
+      created_at: a.created_at,
+      expires_at: a.expires_at,
+      answered_at: final ? a.answered_at : null,
+      answered_via: final ? a.answered_via : null,
+    };
+  };
+
+  /** store.ts expireIfDue: past the deadline an unclaimed request expires. */
+  const expireIfDue = (a: FakeApproval) => {
+    if (a.status === "pending" && !a.answered_at && Date.parse(a.expires_at) <= Date.now()) a.status = "expired";
+    return a;
+  };
+
+  /** The route's zod body: 1 to 50 distinct uuids and a known origin. */
+  const parseAsk = (body: unknown): string[] | null => {
+    const { pitch_ids: ids, origin } = (body ?? {}) as { pitch_ids?: string[]; origin?: string };
+    if (!Array.isArray(ids) || ids.length < 1 || ids.length > 50) return null;
+    if (new Set(ids).size !== ids.length || !ids.every((id) => UUID.test(id))) return null;
+    return ["cli", "mcp", "agent_session"].includes(origin ?? "") ? ids : null;
+  };
+
+  const rejectionOf = (id: string) => {
+    const row = queue.find((r) => r.id === id);
+    if (!row) return "not_found";
+    return row.state === "pending_approval" ? null : "not_pending";
+  };
+
+  /** store.ts supersedeOverlapping: an unclaimed pending request that shares a pitch is replaced. */
+  const supersede = (ids: string[]) => {
+    for (const other of approvals.values()) {
+      if (other.status === "pending" && !other.answered_at && other.items.some((i) => ids.includes(i.pitch_id))) other.status = "superseded";
+    }
+  };
+
+  const createApproval: Handler = ({ body }) => {
+    const ids = parseAsk(body);
+    if (!ids) return [400, { error: "Body needs pitch_ids (1 to 50 pitch ids) and origin (cli, mcp or agent_session)" }];
+    const rejected = ids.map((id) => ({ id, reason: rejectionOf(id) })).filter((r) => r.reason !== null);
+    if (rejected.length > 0) return [422, { error: "Some pitches cannot be approved now", rejected }];
+    supersede(ids);
+    const now = Date.now();
+    const approval: FakeApproval = {
+      id: uuid(0xf0, approvals.size + 1),
+      code: CODES[approvals.size % CODES.length],
+      status: "pending",
+      items: ids.map((id) => {
+        const row = queue.find((r) => r.id === id)!;
+        return { pitch_id: id, to: row.to, subject: row.subject };
+      }),
+      result: null,
+      created_at: new Date(now).toISOString(),
+      expires_at: new Date(now + approvalCtl.ttlMs).toISOString(),
+      answered_at: null,
+      answered_via: null,
+    };
+    approvals.set(approval.id, approval);
+    return [201, publicRequest(approval)];
+  };
+
+  const readApproval: Handler = ({ params }) => {
+    const found = approvals.get(params[0]);
+    return found ? [200, publicRequest(expireIfDue(found))] : [404, { error: "Approval request not found" }];
+  };
+
+  const cancelApproval: Handler = ({ params }) => {
+    const found = approvals.get(params[0]);
+    if (!found) return [404, { error: "Approval request not found" }];
+    const a = expireIfDue(found);
+    if (a.status === "pending" && !a.answered_at) {
+      a.status = "cancelled";
+      return [200, publicRequest(a)];
+    }
+    return [409, { error: "This request can no longer be cancelled", request: publicRequest(a) }];
+  };
+
+  /** The signed-in person on the approve page. `claim` starts answering without finishing. */
+  function answerApproval(id: string, answer: ApprovalAnswer) {
+    const a = approvals.get(id);
+    if (!a || a.status !== "pending") throw new Error(`approval ${id} is not pending`);
+    a.answered_at = new Date().toISOString();
+    a.answered_via = "web_session";
+    if (answer === "claim") return;
+    if (answer === "decline") {
+      a.status = "declined";
+      a.result = { approved: [], skipped: [] };
+      return;
+    }
+    a.result = approvalResult(a, answer.skip ?? {});
+    a.status = statusForResult(a.result);
+    for (const row of queue) if (a.result.approved.includes(row.id)) row.state = "approved";
+  }
+
+  /** model.ts statusForResult. */
+  const statusForResult = (r: NonNullable<FakeApproval["result"]>) => (r.skipped.length === 0 && r.approved.length > 0 ? "approved" : "partial");
+
+  function approvalResult(a: FakeApproval, skip: Record<string, string>) {
+    const approved = a.items.map((i) => i.pitch_id).filter((pid) => !(pid in skip));
+    return { approved, skipped: Object.entries(skip).map(([id, reason]) => ({ id, reason })) };
+  }
+
   const routes: Array<[string, RegExp, Handler]> = [
+    ["POST", /^\/api\/v1\/approval-requests$/, createApproval],
+    ["GET", /^\/api\/v1\/approval-requests\/([^/]+)$/, readApproval],
+    ["POST", /^\/api\/v1\/approval-requests\/([^/]+)\/cancel$/, cancelApproval],
     ["GET", /^\/api\/v1\/campaigns$/, ({ query }) => {
       const rows = query.status ? [CAMPAIGN].filter((c) => c.status === query.status) : [CAMPAIGN];
       const { rows: pageRows, page, limit } = pageOf(rows, query);
@@ -291,39 +519,118 @@ export function fakeTapState(opts: FakeTapOptions = {}) {
     return [404, { error: "Not found" }];
   }
 
-  return { contacts, queue, handle };
+  const APPROVAL_PATH = /^\/api\/v1\/approval-requests\/([^/]+)(\/cancel)?$/;
+
+  /**
+   * The request a call holds open: a GET while it is pending, or a cancel
+   * while a person is answering (the cancel route's settledRow).
+   */
+  function heldApproval(method: string, path: string): FakeApproval | undefined {
+    const match = APPROVAL_PATH.exec(path);
+    const a = match ? approvals.get(match[1]) : undefined;
+    if (!a || expireIfDue(a).status !== "pending") return undefined;
+    if (match![2]) return method === "POST" && a.answered_at ? a : undefined;
+    return method === "GET" ? a : undefined;
+  }
+
+  /** How long to hold the call. The fake polls each 100 ms; the routes poll each second. */
+  function waitSeconds(method: string, path: string, query: Record<string, string>): number {
+    if (!heldApproval(method, path)) return 0;
+    if (path.endsWith("/cancel")) return 25;
+    const raw = Number(query.wait ?? 0);
+    return Number.isFinite(raw) ? Math.min(25, Math.max(0, Math.floor(raw))) : 0;
+  }
+
+  const stillHeld = (method: string, path: string) => Boolean(heldApproval(method, path));
+
+  const faults: FaultRule[] = [];
+  const served: Served[] = [];
+  const net = { outage: false };
+
+  const ruleMatches = (f: FaultRule, method: string, path: string, query: Record<string, string>) =>
+    f.method === method && f.path.test(path) && Object.entries(f.query ?? {}).every(([k, v]) => query[k] === v);
+
+  function takeFault(method: string, path: string, query: Record<string, string>): Fault | null {
+    const index = faults.findIndex((f) => ruleMatches(f, method, path, query));
+    if (index < 0) return null;
+    const rule = faults[index];
+    if (!rule.sticky) faults.splice(index, 1);
+    served.push({ rule, at: Date.now() });
+    return rule.fault;
+  }
+
+  return { contacts, queue, approvals, approvalCtl, answerApproval, handle, waitSeconds, stillHeld, faults, served, net, takeFault };
 }
 
+/** The v1 gate's refusals (lib/api/api-key-auth.ts). */
+const REFUSAL: Record<number, string> = { 401: "Invalid or missing API key", 403: "Insufficient scope: agents:read required" };
+
 export async function startFakeTap(opts: FakeTapOptions = {}, port = 0) {
-  let state = fakeTapState(opts);
   const requests: Recorded[] = [];
+  let state: ReturnType<typeof fakeTapState>;
+
+  const send = (res: ServerResponse, status: number, payload: unknown, headers: Record<string, string> = {}) => {
+    res.writeHead(status, { "Content-Type": "application/json", ...headers });
+    res.end(JSON.stringify(payload));
+  };
+
+  /** Apply a fault, or return false to answer normally (after any delay). */
+  function injected(fault: Fault | null, req: IncomingMessage, res: ServerResponse, answer: () => void, reply: (edit?: (p: Record<string, unknown>) => unknown) => void): boolean {
+    if (!fault) return false;
+    if ("body" in fault) {
+      res.writeHead(fault.status ?? 200, { "Content-Type": "application/json" });
+      res.end(fault.body);
+    } else if ("edit" in fault) reply(fault.edit);
+    else if ("dropAfterMs" in fault) setTimeout(() => req.socket.destroy(), fault.dropAfterMs);
+    else if ("delayMs" in fault) setTimeout(answer, fault.delayMs);
+    else if (fault.status === 429) send(res, 429, { error: "Rate limit exceeded" }, { "Retry-After": String(fault.retryAfter) });
+    else send(res, fault.status, { error: REFUSAL[fault.status] ?? "Internal server error" });
+    return true;
+  }
 
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     let raw = "";
     req.on("data", (chunk) => (raw += chunk));
     req.on("end", () => {
       const url = new URL(req.url ?? "/", "http://localhost");
+      const method = req.method ?? "";
       const query = Object.fromEntries(url.searchParams);
       const body = raw ? JSON.parse(raw) : undefined;
       const auth = req.headers.authorization;
-      requests.push({ method: req.method ?? "", path: url.pathname, query, auth, body });
-      const [status, payload] =
-        auth === `Bearer ${NO_PLAN_KEY}` ? PLAN_REFUSAL : state.handle(req.method ?? "", url.pathname, query, body);
-      res.writeHead(status, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(payload));
+      requests.push({ method, path: url.pathname, query, auth, body, at: Date.now() });
+      if (state.net.outage) return req.socket.destroy();
+      const reply = (edit?: (p: Record<string, unknown>) => unknown) => {
+        const [status, payload] = auth === `Bearer ${NO_PLAN_KEY}` ? PLAN_REFUSAL : state.handle(method, url.pathname, query, body);
+        send(res, status, edit ? edit(payload as Record<string, unknown>) : payload);
+      };
+      const answer = () => {
+        const deadline = Date.now() + state.waitSeconds(method, url.pathname, query) * 1000;
+        const poll = () => {
+          if (state.net.outage) return req.socket.destroy();
+          return Date.now() < deadline && state.stillHeld(method, url.pathname) && !req.socket.destroyed ? setTimeout(poll, 100) : reply();
+        };
+        poll();
+      };
+      if (!injected(state.takeFault(method, url.pathname, query), req, res, answer, reply)) answer();
     });
   });
   await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  state = fakeTapState(opts, url);
 
   return {
-    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    url,
     requests,
     get state() {
       return state;
     },
     reset() {
-      state = fakeTapState(opts);
+      state = fakeTapState(opts, url);
     },
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      }),
   };
 }

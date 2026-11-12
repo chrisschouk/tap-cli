@@ -8,6 +8,7 @@ import { campaignsCommand } from "./commands/campaigns.js";
 import { contactsCommand } from "./commands/contacts.js";
 import { queueCommand } from "./commands/queue.js";
 import { statsCommand } from "./commands/stats.js";
+import { approveCommand } from "./commands/approve.js";
 import { authCommand } from "./commands/auth.js";
 import { outcomeCommand } from "./commands/outcome.js";
 import { pitchCommand } from "./commands/pitch.js";
@@ -34,8 +35,11 @@ export function buildProgram(): Command {
     .description(
       "Total Audio Platform CLI -- manage campaigns, contacts, and pitches from the terminal",
     )
-    .version(VERSION, "-v, --version");
+    .version(VERSION, "-v, --version")
+    // Lets `tap approve status <id> --json` reach status, not its parent's --json.
+    .enablePositionalOptions();
 
+  program.addCommand(approveCommand());
   program.addCommand(authCommand());
   program.addCommand(campaignsCommand());
   program.addCommand(connectCommand());

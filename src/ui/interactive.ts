@@ -72,6 +72,7 @@ const MENU: Record<string, () => Promise<void>> = {
     const campaignId = await selectCampaign({ statusFilter: "active", message: "Which campaign?" });
     if (campaignId) await runCommand(["pitch", campaignId]);
   },
+  approve: () => runCommand(["approve"]),
   send: () => withCampaign("Which campaign?", (id) => runCommand(["send", id])),
   outcome: outcomeMenu,
   queue: () => runCommand(["queue"]),
@@ -88,6 +89,7 @@ function mainMenuOptions(hints: Hints | null) {
     { value: "campaigns", label: "Campaigns", hint: hints ? `${hints.campaigns} active` : "list, create, view details" },
     { value: "contacts", label: "Contacts", hint: hints ? `${hints.contacts} total` : "list, search, view details" },
     { value: "pitch", label: "Pitch", hint: "generate AI pitch drafts" },
+    { value: "approve", label: "Approve", hint: "ask a person to approve pitches in TAP" },
     { value: "send", label: "Send", hint: "pitches waiting for your approval in TAP" },
     { value: "outcome", label: "Outcome", hint: "log a campaign outcome" },
     { value: "queue", label: "Queue", hint: queueHint || "today's action queue" },

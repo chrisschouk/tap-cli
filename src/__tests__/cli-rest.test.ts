@@ -1,9 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { startFakeTap, CAMPAIGN_ID, NO_PLAN_KEY, type Recorded } from "./fake-tap.js";
+import { startFakeTap, CAMPAIGN_ID, NO_PLAN_KEY } from "./fake-tap.js";
+import { freshHome, runTap, type RunOptions } from "./tap-process.js";
 
 let tapServer: Awaited<ReturnType<typeof startFakeTap>>;
 
@@ -13,42 +12,8 @@ beforeAll(async () => {
 beforeEach(() => tapServer.reset());
 afterAll(() => tapServer.close());
 
-function freshHome(config?: object): string {
-  const home = mkdtempSync(join(tmpdir(), "tap-cli-"));
-  if (config) {
-    mkdirSync(join(home, ".tap"));
-    writeFileSync(join(home, ".tap", "config.json"), JSON.stringify(config));
-  }
-  return home;
-}
-
-interface RunOptions {
-  env?: Record<string, string | undefined>;
-  stdin?: string;
-}
-
 function tap(args: string[], opts: RunOptions = {}) {
-  const before = tapServer.requests.length;
-  return new Promise<{ code: number; stdout: string; stderr: string; output: string; calls: Recorded[] }>((resolve) => {
-    const child = spawn(join(process.cwd(), "node_modules/.bin/tsx"), ["src/cli.ts", ...args], {
-      env: {
-        PATH: process.env.PATH,
-        HOME: freshHome(),
-        NO_COLOR: "1",
-        TAP_API_KEY: "tap_ak_test",
-        TAP_URL: tapServer.url,
-        ...opts.env,
-      },
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d) => (stdout += d));
-    child.stderr.on("data", (d) => (stderr += d));
-    child.stdin.end(opts.stdin ?? "");
-    child.on("close", (code) =>
-      resolve({ code: code ?? 1, stdout, stderr, output: stdout + stderr, calls: tapServer.requests.slice(before) }),
-    );
-  });
+  return runTap(tapServer, args, opts);
 }
 
 const T = 20_000;
@@ -140,6 +105,8 @@ describe("send never sends", () => {
       "approved",
       "draft",
       "held_for_payment",
+      "pending_approval",
+      "pending_approval",
       "pending_approval",
       "send_failed",
     ]);

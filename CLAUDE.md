@@ -31,7 +31,8 @@ The `prepublishOnly` hook runs `pnpm test && pnpm build` automatically.
 - `queue` — TAP's action list
 - `stats` — prints the TAP Home link (no stats endpoint in v1)
 - `open [id]` — open a record in the browser
-- `send <campaign-id>` — lists pitches waiting for approval and links to where the artist approves and sends in TAP. Never sends.
+- `approve [campaign-id]` — asks a signed-in person to approve pitches (approval request with code, link and QR), waits, reports per pitch. `approve status <request-id> [--wait]`. Never approves or sends: the key only creates, reads and withdraws the request. Once a request exists the command ends only through `finalise` with an `Ending` from `lib/approval-session.ts` (answered, withdrawn, open, gone, left_open); key and signal handlers press `StopRequest` and never exit. Exits 0 approved, 1 nothing approved, 130 stopped by the person.
+- `send <campaign-id>` — lists pitches waiting for approval and links to where the artist approves and sends in TAP (and to `tap approve`). Never sends.
 - `discover` — prints the TAP contacts link (no discovery endpoint in v1)
 - `import` — bulk import contacts, including sink (`datasink`) output from a file or stdin (`-`)
 - `skill` — run a TAP skill
@@ -39,6 +40,9 @@ The `prepublishOnly` hook runs `pnpm test && pnpm build` automatically.
 
 Every command goes through `lib/rest.ts` `restRequest()`. There is no Supabase client. Approving and
 sending a pitch are human-only in TAP: never add a CLI path that approves or sends.
+`src/__tests__/rest-only.guardrail.test.ts` allowlists every route the CLI calls. Tests run the CLI
+against `src/__tests__/fake-tap.ts`, whose shapes are copied from the TAP route handlers; the
+`tap approve` demo tape is `scripts/demos/approve.tape` (output in the gitignored `.demo/`).
 
 ## Publish flow (npm)
 

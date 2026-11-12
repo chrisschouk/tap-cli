@@ -19,15 +19,13 @@
 import chalk from "chalk";
 import { intro } from "./ui/format.js";
 import { buildProgram, VERSION } from "./program.js";
+import { guardOutput, interrupt } from "./ui/interrupt.js";
 
 // chalk ignores NO_COLOR (https://no-color.org); honour it here.
 if (process.env.NO_COLOR) chalk.level = 0;
 
-// Restore cursor visibility if user hits Ctrl+C during a spinner
-process.on("SIGINT", () => {
-  process.stdout.write("\x1B[?25h");
-  process.exit(130);
-});
+guardOutput();
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => interrupt("signal"));
 
 // Handle --version/-v before Commander
 const hasVersionFlag = process.argv.includes("--version") || process.argv.includes("-v");

@@ -16,14 +16,15 @@ const API_KEYS_URL = "https://totalaudiopromo.com/settings/api-keys";
 /**
  * The scopes each command needs, from the hasScope checks in the v1 routes it
  * calls. Outcomes are logged and read under campaigns:*; the outreach queue
- * that `tap send` reads needs pitches:read.
+ * that `tap send` reads needs pitches:read. Approval requests need agents:*.
  */
 const COMMAND_SCOPES: Array<[string, string]> = [
-  ["campaigns:read", "campaigns, send, pitch, contacts show"],
+  ["campaigns:read", "campaigns, send, pitch, approve, contacts show"],
   ["campaigns:write", "campaigns create/status, outcome, import --campaign"],
   ["contacts:read contacts:write", "contacts, import, open"],
-  ["pitches:read", "send"],
+  ["pitches:read", "send, approve"],
   ["pitches:write", "pitch"],
+  ["agents:write agents:read", "approve"],
   ["actions:read", "queue"],
   ["skills:read skills:write", "skill"],
   ["enrich", "contacts enrich (spends enrichments)"],

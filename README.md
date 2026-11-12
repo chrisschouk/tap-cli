@@ -60,7 +60,7 @@
 | 🚀 | **Campaign management** | Create, list, filter, and update campaigns from the terminal |
 | 👤 | **Contact management** | Search, add, enrich, and import contacts with deduplication |
 | ✍️ | **AI pitch drafting** | TAP drafts pitch variants per contact and saves them for your review |
-| 📬 | **Approve in TAP** | See which pitches wait for you and jump straight to where you approve and send them |
+| 📬 | **Approve from your phone** | Ask for approval from the terminal, approve in TAP on your phone, and see each pitch's result back in the terminal |
 | 📋 | **Action queue** | See what needs you today: follow-ups, replies, stalled campaigns, coverage to log |
 | 🧠 | **Skills** | List, run, fork, and inspect workspace skills from the terminal |
 | 🔐 | **Scoped keys** | Same `tap_ak_*` keys as the REST API and MCP server |
@@ -286,9 +286,54 @@ tap pitch <campaign-id> <contact-id> --json
 
 ---
 
+### `tap approve` — ask for approval, answer in TAP
+
+`tap approve` asks a person signed in to TAP to approve a campaign's pitches. It lists the pitches waiting for approval, lets you choose them, and prints a four-character code, the approve link and a QR code of the link. You open the link on your phone or computer, check that the page shows the same code, and approve there. The CLI waits, then shows which pitches were approved and why any were skipped.
+
+The CLI never approves or sends. Its API key can create a request, read the answer and withdraw the request. Only a person signed in to TAP in a browser can answer it.
+
+```bash
+tap approve <campaign-id>                          # choose pitches, ask, wait
+tap approve <campaign-id> --all                    # every pitch waiting for approval
+tap approve <campaign-id> --pitch <id> --pitch <id>
+tap approve <campaign-id> --all --no-wait --json   # for agents: return the request at once
+tap approve status <request-id> --wait --json      # then wait for the answer
+```
+
+While it waits, `o` opens the link on this computer and `c` or Ctrl+C withdraws the request. SIGTERM and SIGHUP withdraw it too. Press `c` or Ctrl+C a second time to quit without waiting for the withdrawal. A request expires after 15 minutes. If nothing waits for approval but the campaign has drafts, `tap approve` lists them and prints the TAP page where you send them for approval.
+
+If TAP stops answering while it waits (a dropped connection, a 5xx or a 429), `tap approve` keeps trying until the request expires, honouring Retry-After. Whenever it stops without an answer or a confirmed withdrawal (TAP unreachable, the key refused with 401 or 403, a withdrawal that failed, or you quit), it says why, that the request may still be answered, and prints its id, code, link, expiry and the command that reads the answer later: `tap approve status <request-id> --wait`. With `--json`, stdout carries `{ "outcome": "left_open", "id", "code", "url", "expires_at", "status": "unknown", "reason", "status_command" }`. Every `--json` result names its ending in `outcome`: `answered`, `withdrawn`, `open`, `gone` or `left_open`.
+
+If TAP does not answer the request to ask (it times out after 15 seconds, the connection drops, TAP answers 5xx or with a reply the CLI cannot read, or you quit while it is in flight), there is no id to show, so `tap approve` says TAP may have created the request, with `"outcome": "create_unknown"` under `--json`. TAP has no page that lists open requests yet. Asking again replaces a request nobody has started answering.
+
+A reply from TAP that the CLI cannot read while it waits (empty, not JSON, a missing field, or a status this CLI does not know yet) is retried for up to 10 seconds and then ends as `left_open`, with the reason and the request's details. If the output closes while a request is open (`tap approve <campaign-id> --all | head -1`), the CLI withdraws the request and reports on whichever of stdout and stderr still works.
+
+In the chooser, space chooses a pitch, `a` chooses all or none, `r` shows the whole pitch, enter asks and `q` quits. The list scrolls, so a long campaign fits a small terminal. TAP lists who each pitch goes to once you ask, before the code; if one is wrong, `c` withdraws the request. The read view shows the subject and body; TAP adds the release block and the sender when it sends, and the approve page shows the whole email.
+
+TAP takes up to 50 pitches a request. Ask about more and `tap approve` asks about the first 50 and tells you how to ask about the rest once that request is answered.
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--all` | Ask about every pitch waiting for approval (up to 50) |
+| `--pitch <id>` | Ask about this pitch. Repeat for more |
+| `--no-wait` | Return once the request exists. Check it with `tap approve status <request-id>` |
+| `--json` | Print the request, or the answer with a per-pitch summary, as JSON |
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | At least one pitch was approved, or the request still waits (`--no-wait`, `status` without `--wait`) |
+| 1 | Nothing was approved: declined, expired, every pitch skipped, replaced by a newer request, no such request, or the CLI stopped without an answer (TAP unreachable, the key refused) |
+| 130 | You stopped it: Ctrl+C, `c` or `q`, or SIGTERM or SIGHUP. An open request is withdrawn first; a second press quits and prints the request so you can read it later |
+
+---
+
 ### `tap send` — see what waits for your approval
 
-Approving and sending a pitch happen in TAP, by you. `tap send` lists every one of the campaign's pitches that still needs you: drafts, pitches waiting for approval, approved pitches TAP has not sent yet, and approved pitches whose send failed or is held for payment. It then prints the link to the release's pitching tab where you approve and send them.
+Approving and sending a pitch happen in TAP, by you. `tap send` lists every one of the campaign's pitches that still needs you: drafts, pitches waiting for approval, approved pitches TAP has not sent yet, and approved pitches whose send failed or is held for payment. It then prints the link to the release's pitching tab where you approve and send them. To ask for approval from the terminal and approve on your phone, use `tap approve`.
 
 ```bash
 tap send <campaign-id>

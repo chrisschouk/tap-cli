@@ -6,10 +6,15 @@ import { join } from "node:path";
  * Every TAP route the CLI may call. Adding a call means adding it here, where
  * review sees it. Approving and sending a pitch are human-only in TAP, so no
  * approve or send route may ever appear. POST /campaigns/:id/pitches drafts
- * pitches; it does not send them.
+ * pitches; it does not send them. The approval-request routes ask a person,
+ * read their answer and withdraw the ask; only a signed-in browser session can
+ * answer (apps/tap/app/api/approval-requests/:id/answer, outside v1).
  */
 const ALLOWED = new Set([
   "GET /api/v1/actions",
+  "POST /api/v1/approval-requests",
+  "GET /api/v1/approval-requests/:id",
+  "POST /api/v1/approval-requests/:id/cancel",
   "GET /api/v1/campaigns",
   "POST /api/v1/campaigns",
   "GET /api/v1/campaigns/:id",
@@ -99,6 +104,7 @@ describe("the CLI reaches TAP only through REST v1", () => {
   });
 
   it("allows no approve or send route; approving and sending are human-only in TAP", () => {
-    expect([...ALLOWED].filter((r) => /approv|\/send/.test(r))).toEqual([]);
+    const askOnly = /^(POST|GET) \/api\/v1\/approval-requests(\/:id(\/cancel)?)?$/;
+    expect([...ALLOWED].filter((r) => /approv|\/send|\/answer/.test(r) && !askOnly.test(r))).toEqual([]);
   });
 });
