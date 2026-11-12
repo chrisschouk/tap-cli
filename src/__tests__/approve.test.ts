@@ -3,27 +3,21 @@ import { startFakeTap, CAMPAIGN_ID, type ApprovalAnswer, type Recorded } from ".
 import { runTap, type RunOptions } from "./tap-process.js";
 
 let tapServer: Awaited<ReturnType<typeof startFakeTap>>;
+let mark = 0;
 
 beforeAll(async () => {
   tapServer = await startFakeTap();
 });
-beforeEach(() => tapServer.reset());
+beforeEach(() => {
+  tapServer.reset();
+  mark = tapServer.requests.length;
+});
 afterAll(() => tapServer.close());
 
 const T = 30_000;
 const tap = (args: string[], opts: RunOptions = {}) => runTap(tapServer, args, opts);
 
 const pendingIds = () => tapServer.state.queue.filter((r) => r.state === "pending_approval").map((r) => r.id);
-
-/** The id of the request the CLI created, once it exists. */
-async function asked(): Promise<string> {
-  for (let i = 0; i < 200; i++) {
-    const found = [...tapServer.state.approvals.values()].find((a) => a.status === "pending");
-    if (found) return found.id;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  throw new Error("the CLI never created an approval request");
-}
 
 async function until(check: () => boolean, what: string): Promise<void> {
   for (let i = 0; i < 400; i++) {
@@ -33,16 +27,52 @@ async function until(check: () => boolean, what: string): Promise<void> {
   throw new Error(`never happened: ${what}`);
 }
 
+/** The id of the request the CLI created, once it exists. */
+async function asked(): Promise<string> {
+  await until(() => [...tapServer.state.approvals.values()].some((a) => a.status === "pending"), "the CLI created an approval request");
+  return [...tapServer.state.approvals.values()].find((a) => a.status === "pending")!.id;
+}
+
 const REQUEST_PATH = /^\/api\/v1\/approval-requests\/[^/]+$/;
+const CANCEL_PATH = /^\/api\/v1\/approval-requests\/[^/]+\/cancel$/;
+const CREATE_PATH = /^\/api\/v1\/approval-requests$/;
+const sinceMark = () => tapServer.requests.slice(mark);
 const requestReads = (calls: Recorded[]) => calls.filter((c) => c.method === "GET" && REQUEST_PATH.test(c.path));
+const cancels = (calls: Recorded[]) => calls.filter((c) => c.method === "POST" && CANCEL_PATH.test(c.path));
 const onlyApproval = () => [...tapServer.state.approvals.values()][0];
+const longPolling = () => requestReads(sinceMark()).some((c) => c.query.wait === "25");
+const cancelArrived = () => cancels(sinceMark()).length > 0;
+
+/** The CLI is holding a long poll on the request: it has shown the ask and is waiting. */
+async function waitingOnAnswer(): Promise<string> {
+  const id = await asked();
+  await until(longPolling, "the CLI started waiting for the answer");
+  return id;
+}
 
 /** Answer as the signed-in person once the CLI is waiting. */
 async function answerWhenAsked(answer: ApprovalAnswer): Promise<string> {
-  const id = await asked();
-  await new Promise((r) => setTimeout(r, 300));
+  const id = await waitingOnAnswer();
   tapServer.state.answerApproval(id, answer);
   return id;
+}
+
+/** What every report of a request left open must carry. */
+function expectLeftOpenText(output: string, id: string) {
+  const { code } = onlyApproval();
+  expect(output).toContain(id);
+  expect(output).toContain(code);
+  expect(output).toContain(`${tapServer.url}/approve/${id}`);
+  expect(output).toMatch(/Expires\s+\d\d:\d\d/);
+  expect(output).toContain(`tap approve status ${id} --wait`);
+}
+
+function expectLeftOpenJson(stdout: string, id: string) {
+  const { code, expires_at } = onlyApproval();
+  const parsed = JSON.parse(stdout);
+  expect(parsed).toMatchObject({ outcome: "left_open", id, code, url: `${tapServer.url}/approve/${id}`, expires_at, status: "unknown", status_command: `tap approve status ${id} --wait` });
+  expect(typeof parsed.reason).toBe("string");
+  return parsed as { reason: string };
 }
 
 describe("tap approve asks a person and waits", () => {
@@ -88,7 +118,7 @@ describe("tap approve asks a person and waits", () => {
 
   it("withdraws the request on Ctrl+C and exits 130", async () => {
     const run = await tap(["approve", CAMPAIGN_ID, "--all"], {
-      onSpawn: (child) => void asked().then(() => setTimeout(() => child.kill("SIGINT"), 300)),
+      onSpawn: (child) => void waitingOnAnswer().then(() => child.kill("SIGINT")),
     });
     expect(run.code).toBe(130);
     expect(run.output).toContain("Withdrawn. Nothing was approved.");
@@ -99,10 +129,11 @@ describe("tap approve asks a person and waits", () => {
   it("keeps waiting when the withdrawal is refused because someone is answering", async () => {
     const run = await tap(["approve", CAMPAIGN_ID, "--all"], {
       onSpawn: (child) =>
-        void asked().then((id) => {
+        void waitingOnAnswer().then(async (id) => {
           tapServer.state.answerApproval(id, "claim");
-          setTimeout(() => child.kill("SIGINT"), 300);
-          setTimeout(() => tapServer.state.answerApproval(id, {}), 1200);
+          child.kill("SIGINT");
+          await until(cancelArrived, "the CLI asked to withdraw");
+          tapServer.state.answerApproval(id, {});
         }),
     });
     expect(run.calls.some((c) => c.path.endsWith("/cancel"))).toBe(true);
@@ -149,8 +180,11 @@ describe("tap approve asks a person and waits", () => {
     expect(pending.code).toBe(0);
     expect(JSON.parse(pending.stdout).request.status).toBe("pending");
 
-    setTimeout(() => tapServer.state.answerApproval(id, {}), 500);
-    const answered = await tap(["approve", "status", id, "--wait"]);
+    mark = tapServer.requests.length;
+    const [answered] = await Promise.all([
+      tap(["approve", "status", id, "--wait"]),
+      until(longPolling, "status started waiting").then(() => tapServer.state.answerApproval(id, {})),
+    ]);
     expect(answered.code).toBe(0);
     expect(answered.output).toContain("Approved 3 of 3");
   }, T);
@@ -200,10 +234,14 @@ describe("tap approve does not orphan a request", () => {
       { method: "GET", path: REQUEST_PATH, fault: { dropAfterMs: 300 } },
       { method: "GET", path: REQUEST_PATH, fault: { status: 429, retryAfter: 2 } },
     );
+    const servedRateLimit = () => tapServer.state.served.find((s) => "status" in s.rule.fault && s.rule.fault.status === 429);
+    const retriedAfter = () => {
+      const limited = servedRateLimit();
+      return limited ? requestReads(sinceMark()).find((c) => c.at > limited.at) : undefined;
+    };
     const answer = async () => {
       const id = await asked();
-      await until(() => tapServer.state.faults.length === 0, "every fault played");
-      await new Promise((r) => setTimeout(r, 2500));
+      await until(() => retriedAfter() !== undefined, "the CLI read again after the 429");
       tapServer.state.answerApproval(id, {});
     };
     const [run] = await Promise.all([tap(["approve", CAMPAIGN_ID, "--all"]), answer()]);
@@ -213,26 +251,21 @@ describe("tap approve does not orphan a request", () => {
     expect(run.output).toContain("Could not reach TAP. Trying again in 2s");
     expect(run.output).toContain("TAP answered 429. Trying again in 2s");
     expect(run.output).toContain("Back in touch with TAP.");
-    const reads = requestReads(run.calls);
-    expect(reads.length).toBeGreaterThanOrEqual(4);
-    expect(reads[3].at - reads[2].at).toBeGreaterThanOrEqual(1900);
-    expect(run.calls.some((c) => c.path.endsWith("/cancel"))).toBe(false);
+    expect(retriedAfter()!.at - servedRateLimit()!.at).toBeGreaterThanOrEqual(2000);
+    expect(cancels(run.calls)).toHaveLength(0);
   }, T);
 
   it("says the request was not withdrawn when TAP stays unreachable, with the id, code, link and status command", async () => {
     tapServer.state.approvalCtl.ttlMs = 4000;
     const run = await tap(["approve", CAMPAIGN_ID, "--all"], {
-      onSpawn: () => void asked().then(() => setTimeout(() => (tapServer.state.net.outage = true), 800)),
+      onSpawn: () => void waitingOnAnswer().then(() => (tapServer.state.net.outage = true)),
     });
-    const { id, code } = onlyApproval();
+    const { id } = onlyApproval();
     expect(run.code).toBe(1);
     expect(run.output).toContain("Could not reach TAP. Stopped waiting for the answer.");
     expect(run.output).toMatch(/A person may have approved it before then, and TAP sends what they approved/);
-    expect(run.output).toContain(id);
-    expect(run.output).toContain(code);
-    expect(run.output).toContain(`${tapServer.url}/approve/${id}`);
-    expect(run.output).toContain(`tap approve status ${id} --wait`);
-    expect(run.calls.some((c) => c.path.endsWith("/cancel"))).toBe(false);
+    expectLeftOpenText(run.output, id);
+    expect(cancels(run.calls)).toHaveLength(0);
   }, T);
 
   it("gives up as JSON with status unknown and the status command", async () => {
@@ -240,14 +273,13 @@ describe("tap approve does not orphan a request", () => {
     const run = await tap(["approve", CAMPAIGN_ID, "--all", "--json"], {
       onSpawn: () => void asked().then(() => (tapServer.state.net.outage = true)),
     });
-    const { id } = onlyApproval();
     expect(run.code).toBe(1);
-    expect(JSON.parse(run.stdout)).toMatchObject({ id, status: "unknown", status_command: `tap approve status ${id} --wait` });
+    expect(expectLeftOpenJson(run.stdout, onlyApproval().id).reason).toBe("Could not reach TAP. Stopped waiting for the answer.");
   }, T);
 
   it.each(["SIGTERM", "SIGHUP"] as const)("withdraws on %s like Ctrl+C", async (signal) => {
     const run = await tap(["approve", CAMPAIGN_ID, "--all"], {
-      onSpawn: (child) => void asked().then(() => setTimeout(() => child.kill(signal), 300)),
+      onSpawn: (child) => void waitingOnAnswer().then(() => child.kill(signal)),
     });
     expect(run.code).toBe(130);
     expect(onlyApproval().status).toBe("cancelled");
@@ -255,13 +287,12 @@ describe("tap approve does not orphan a request", () => {
 
   it("withdraws a request whose create was interrupted, once TAP returns its id", async () => {
     tapServer.state.faults.push({ method: "POST", path: /^\/api\/v1\/approval-requests$/, fault: { delayMs: 1500 } });
-    const before = tapServer.requests.length;
     const run = await tap(["approve", CAMPAIGN_ID, "--all"], {
       onSpawn: (child) =>
-        void until(() => tapServer.requests.slice(before).some((r) => r.method === "POST"), "the create arrived").then(() => child.kill("SIGINT")),
+        void until(() => sinceMark().some((r) => r.method === "POST"), "the create arrived").then(() => child.kill("SIGINT")),
     });
     expect(run.code).toBe(130);
-    expect(run.output).toContain("Stopping. The request will be withdrawn.");
+    expect(run.output).toContain("Stopping. The request will be withdrawn once TAP returns it.");
     expect(run.output).toContain("Withdrawn. Nothing was approved.");
     expect(onlyApproval().status).toBe("cancelled");
   }, T);
@@ -269,9 +300,137 @@ describe("tap approve does not orphan a request", () => {
   it("withdraws when interrupted while the asked pitches load", async () => {
     tapServer.state.faults.push({ method: "GET", path: REQUEST_PATH, fault: { delayMs: 1500 } });
     const run = await tap(["approve", CAMPAIGN_ID, "--all"], {
-      onSpawn: (child) => void asked().then(() => setTimeout(() => child.kill("SIGINT"), 200)),
+      onSpawn: (child) => void asked().then(() => child.kill("SIGINT")),
     });
     expect(run.code).toBe(130);
     expect(onlyApproval().status).toBe("cancelled");
+  }, T);
+});
+
+describe("every way out once the request exists names it and how to read it", () => {
+  const LONG_POLL = { method: "GET", path: REQUEST_PATH, query: { wait: "25" } };
+
+  it.each([401, 403] as const)("a %d while waiting leaves the request open and says so", async (status) => {
+    tapServer.state.faults.push({ ...LONG_POLL, fault: { status } });
+    const run = await tap(["approve", CAMPAIGN_ID, "--all"]);
+    const { id } = onlyApproval();
+    expect(run.code).toBe(1);
+    expect(run.output).toContain(`TAP refused with ${status}`);
+    expect(run.output).toContain("Stopped waiting for the answer.");
+    expect(run.output).toContain("The request is still open until");
+    expectLeftOpenText(run.output, id);
+    expect(onlyApproval().status).toBe("pending");
+    expect(cancels(run.calls)).toHaveLength(0);
+  }, T);
+
+  it.each([401, 403] as const)("a %d while waiting gives the open request as JSON on stdout", async (status) => {
+    tapServer.state.faults.push({ ...LONG_POLL, fault: { status } });
+    const run = await tap(["approve", CAMPAIGN_ID, "--all", "--json"]);
+    expect(run.code).toBe(1);
+    expect(expectLeftOpenJson(run.stdout, onlyApproval().id).reason).toContain(`TAP refused with ${status}`);
+    expect(onlyApproval().status).toBe("pending");
+  }, T);
+
+  it("a second interrupt during a slow withdrawal quits at once and still names the request", async () => {
+    tapServer.state.faults.push({ method: "POST", path: CANCEL_PATH, fault: { delayMs: 3000 } });
+    let statusAtExit = "";
+    const run = await tap(["approve", CAMPAIGN_ID, "--all"], {
+      onSpawn: (child) => {
+        child.on("exit", () => (statusAtExit = onlyApproval().status));
+        void waitingOnAnswer().then(async () => {
+          child.kill("SIGINT");
+          await until(cancelArrived, "the CLI asked to withdraw");
+          child.kill("SIGINT");
+        });
+      },
+    });
+    const { id } = onlyApproval();
+    expect(run.code).toBe(130);
+    expect(statusAtExit).toBe("pending");
+    expect(run.output).toContain("You quit before TAP confirmed an answer or a withdrawal.");
+    expectLeftOpenText(run.output, id);
+    await until(() => onlyApproval().status === "cancelled", "the slow withdrawal landed");
+  }, T);
+
+  it("an interrupt while TAP is down and the ask is loading tries to withdraw, then says the request is still open", async () => {
+    tapServer.state.approvalCtl.ttlMs = 4000;
+    const started = Date.now();
+    const run = await tap(["approve", CAMPAIGN_ID, "--all"], {
+      onSpawn: (child) =>
+        void asked().then(async () => {
+          tapServer.state.net.outage = true;
+          await until(() => requestReads(sinceMark()).length > 0, "the CLI tried to read the ask");
+          child.kill("SIGINT");
+        }),
+    });
+    const { id } = onlyApproval();
+    expect(run.code).toBe(130);
+    expect(cancels(run.calls).length).toBeGreaterThan(0);
+    expect(run.output).toContain("Could not reach TAP. Could not withdraw the request.");
+    expectLeftOpenText(run.output, id);
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(onlyApproval().status).not.toBe("cancelled");
+  }, T);
+
+  it("a second interrupt while TAP is down quits without waiting for the withdrawal to give up", async () => {
+    const run = await tap(["approve", CAMPAIGN_ID, "--all"], {
+      onSpawn: (child) =>
+        void asked().then(async () => {
+          tapServer.state.net.outage = true;
+          await until(() => requestReads(sinceMark()).length > 0, "the CLI tried to read the ask");
+          child.kill("SIGINT");
+          await until(cancelArrived, "the CLI tried to withdraw");
+          child.kill("SIGINT");
+        }),
+    });
+    expect(run.code).toBe(130);
+    expect(run.output).toContain("You quit before TAP confirmed an answer or a withdrawal.");
+    expectLeftOpenText(run.output, onlyApproval().id);
+    expect(onlyApproval().status).toBe("pending");
+  }, T);
+
+  it("quitting while the create is in flight says TAP may have created the request and where to look", async () => {
+    tapServer.state.faults.push({ method: "POST", path: CREATE_PATH, fault: { delayMs: 1500 } });
+    const run = await tap(["approve", CAMPAIGN_ID, "--all"], {
+      onSpawn: (child) => {
+        let stderr = "";
+        child.stderr!.on("data", (d) => (stderr += d));
+        void until(() => sinceMark().some((r) => r.method === "POST"), "the create arrived").then(async () => {
+          child.kill("SIGINT");
+          await until(() => stderr.includes("Stopping."), "the CLI took the first interrupt");
+          child.kill("SIGINT");
+        });
+      },
+    });
+    expect(run.code).toBe(130);
+    expect(run.output).toContain("You quit before TAP answered. TAP may have created the request anyway.");
+    expect(run.output).toContain(`${tapServer.url}/releases/${CAMPAIGN_ID}?tab=pitching`);
+    await until(() => tapServer.state.approvals.size === 1, "the slow create landed");
+  }, T);
+
+  it("gives up on a create TAP does not answer and says it may exist", async () => {
+    tapServer.state.faults.push({ method: "POST", path: CREATE_PATH, fault: { delayMs: 17_000 } });
+    const run = await tap(["approve", CAMPAIGN_ID, "--all", "--json"]);
+    expect(run.code).toBe(1);
+    expect(JSON.parse(run.stdout)).toMatchObject({ outcome: "create_unknown", status: "unknown", reason: "TAP took too long to answer", may_exist: true });
+    await until(() => tapServer.state.approvals.size === 1, "the slow create landed");
+  }, 40_000);
+
+  it("stops watching on Ctrl+C under status --wait, without withdrawing", async () => {
+    const created = await tap(["approve", CAMPAIGN_ID, "--all", "--no-wait", "--json"]);
+    const { id } = JSON.parse(created.stdout);
+    mark = tapServer.requests.length;
+    const run = await tap(["approve", "status", id, "--wait"], { onSpawn: (child) => void until(longPolling, "status is waiting").then(() => child.kill("SIGINT")) });
+    expect(run.code).toBe(130);
+    expect(run.output).toContain("You stopped watching. The request was not withdrawn.");
+    expectLeftOpenText(run.output, id);
+    expect(cancels(run.calls)).toHaveLength(0);
+    expect(onlyApproval().status).toBe("pending");
+  }, T);
+
+  it("says a request TAP does not have is gone", async () => {
+    const run = await tap(["approve", "status", "00000000-0000-4000-8000-000000000000", "--json"]);
+    expect(run.code).toBe(1);
+    expect(JSON.parse(run.stdout)).toMatchObject({ outcome: "gone", status: "gone" });
   }, T);
 });

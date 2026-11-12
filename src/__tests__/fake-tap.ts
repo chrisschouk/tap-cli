@@ -15,7 +15,8 @@
  *
  * `faults` and `outage` model what a long wait meets: a 429 with Retry-After
  * (the v1 rate limit, lib/api/api-key-auth.ts rateLimitHeaders), a 5xx blip,
- * a connection dropped mid-wait, a slow response, or TAP unreachable.
+ * a connection dropped mid-wait, a slow response, a key refused mid-wait
+ * (401, 403), or TAP unreachable.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -35,13 +36,23 @@ export interface Recorded {
 export type Fault =
   | { status: 429; retryAfter: number }
   | { status: 500 | 502 | 503 }
+  /** The v1 gate refusing the key mid-wait: revoked (401) or scope removed (403). */
+  | { status: 401 | 403 }
   | { dropAfterMs: number }
   | { delayMs: number };
 
 export interface FaultRule {
   method: string;
   path: RegExp;
+  /** Match only requests carrying these query values, such as the long poll's `wait: "25"`. */
+  query?: Record<string, string>;
   fault: Fault;
+}
+
+/** A fault as the fake served it, with the fake's own clock. */
+export interface Served {
+  rule: FaultRule;
+  at: number;
 }
 
 interface Contact {
@@ -528,15 +539,25 @@ export function fakeTapState(opts: FakeTapOptions = {}, appUrl = "https://totala
   const stillHeld = (method: string, path: string) => Boolean(heldApproval(method, path));
 
   const faults: FaultRule[] = [];
+  const served: Served[] = [];
   const net = { outage: false };
 
-  function takeFault(method: string, path: string): Fault | null {
-    const index = faults.findIndex((f) => f.method === method && f.path.test(path));
-    return index < 0 ? null : faults.splice(index, 1)[0].fault;
+  const ruleMatches = (f: FaultRule, method: string, path: string, query: Record<string, string>) =>
+    f.method === method && f.path.test(path) && Object.entries(f.query ?? {}).every(([k, v]) => query[k] === v);
+
+  function takeFault(method: string, path: string, query: Record<string, string>): Fault | null {
+    const index = faults.findIndex((f) => ruleMatches(f, method, path, query));
+    if (index < 0) return null;
+    const [rule] = faults.splice(index, 1);
+    served.push({ rule, at: Date.now() });
+    return rule.fault;
   }
 
-  return { contacts, queue, approvals, approvalCtl, answerApproval, handle, waitSeconds, stillHeld, faults, net, takeFault };
+  return { contacts, queue, approvals, approvalCtl, answerApproval, handle, waitSeconds, stillHeld, faults, served, net, takeFault };
 }
+
+/** The v1 gate's refusals (lib/api/api-key-auth.ts). */
+const REFUSAL: Record<number, string> = { 401: "Invalid or missing API key", 403: "Insufficient scope: agents:read required" };
 
 export async function startFakeTap(opts: FakeTapOptions = {}, port = 0) {
   const requests: Recorded[] = [];
@@ -553,7 +574,7 @@ export async function startFakeTap(opts: FakeTapOptions = {}, port = 0) {
     if ("dropAfterMs" in fault) setTimeout(() => req.socket.destroy(), fault.dropAfterMs);
     else if ("delayMs" in fault) setTimeout(answer, fault.delayMs);
     else if (fault.status === 429) send(res, 429, { error: "Rate limit exceeded" }, { "Retry-After": String(fault.retryAfter) });
-    else send(res, fault.status, { error: "Internal server error" });
+    else send(res, fault.status, { error: REFUSAL[fault.status] ?? "Internal server error" });
     return true;
   }
 
@@ -580,7 +601,7 @@ export async function startFakeTap(opts: FakeTapOptions = {}, port = 0) {
         };
         poll();
       };
-      if (!injected(state.takeFault(method, url.pathname), req, res, answer)) answer();
+      if (!injected(state.takeFault(method, url.pathname, query), req, res, answer)) answer();
     });
   });
   await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));

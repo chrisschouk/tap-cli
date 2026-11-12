@@ -1,6 +1,7 @@
 /**
- * How `tap approve` reports: the per-pitch outcome once a person answers, the
- * pitches TAP refused to ask about, and the same as JSON for agents.
+ * How `tap approve` reports: every ending of a request (answered, withdrawn,
+ * open by choice, gone, left open), the pitches TAP refused to ask about, and
+ * the same as JSON for agents.
  */
 
 import chalk from "chalk";
@@ -8,8 +9,10 @@ import * as out from "../output.js";
 import { COLOUR, GLYPH } from "./theme.js";
 import { blank, summaryBar } from "./format.js";
 import { describeOutcome, rejectionLabel, type Outcome, type Tone } from "../lib/approval-outcome.js";
-import type { ApprovalRequest, CreatedRequest, RejectedPitch } from "../lib/approval-requests.js";
-import type { LostTouch } from "../lib/retry.js";
+import type { ApprovalRequest, RejectedPitch } from "../lib/approval-requests.js";
+import type { Ending, RequestRef } from "../lib/approval-session.js";
+import { dashboard } from "../lib/dashboard.js";
+import { printAsk } from "./approve-wait.js";
 
 /** Recipient email to outlet, from the campaign's contacts. */
 export type Outlets = ReadonlyMap<string, string>;
@@ -110,33 +113,94 @@ export function rejectedJson(rejected: RejectedPitch[]) {
   return { error: "Some pitches cannot be approved now", rejected: rejected.map((r) => ({ ...r, label: rejectionLabel(r) })) };
 }
 
-const statusCommand = (id: string) => `tap approve status ${id} --wait`;
+export const statusCommand = (id: string) => `tap approve status ${id} --wait`;
 
 function clock(iso: string): string {
   return new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 }
 
-/** Under --json: the request, its status unknown, and the command that reads it. */
-export function lostTouchJson(created: CreatedRequest, err: LostTouch) {
-  const { id, code, url, expires_at } = created;
-  return { id, code, url, expires_at, status: "unknown", error: err.reason, status_command: statusCommand(id) };
+export interface RenderContext {
+  json: boolean;
+  /** Draw the QR with the ask (--no-wait on a TTY). */
+  qr: boolean;
+  outlets: Outlets;
+  campaign: { id?: string; label?: string };
 }
 
-/** The CLI stopped trying to reach TAP. The request was not withdrawn, so say where it stands and how to read it. */
-export function printLostTouch(created: CreatedRequest, err: LostTouch, opts: { interrupted: boolean }): void {
-  const open = Date.parse(created.expires_at) > Date.now();
+function stillOpenLine(ref: RequestRef): string {
+  if (!ref.expires_at) return "    TAP may still have it open. A person can approve it there, and TAP sends what they approve.";
+  return Date.parse(ref.expires_at) > Date.now()
+    ? `    The request is still open until ${clock(ref.expires_at)}. A person can still approve it, and TAP sends what they approve.`
+    : `    The request was open until ${clock(ref.expires_at)}. A person may have approved it before then, and TAP sends what they approved.`;
+}
+
+/** The request may still be answered: say why the CLI stopped, where it stands, and how to read it. */
+function printLeftOpen(ref: RequestRef, reason: string): void {
   blank();
-  out.error(`${err.reason}. ${opts.interrupted ? "Could not withdraw the request." : "Stopped waiting for the answer."}`);
-  console.error(
-    open
-      ? `    The request is still open until ${clock(created.expires_at)}. A person can still approve it, and TAP sends what they approve.`
-      : `    The request was open until ${clock(created.expires_at)}. A person may have approved it before then, and TAP sends what they approved.`,
-  );
+  out.error(reason);
+  console.error(stillOpenLine(ref));
   blank();
-  for (const [label, value] of [["Request", created.id], ["Code", created.code], ["Link", created.url]]) {
-    console.log(`  ${chalk.dim(label.padEnd(9))}${value}`);
+  const rows: Array<[string, string | null]> = [["Request", ref.id], ["Code", ref.code], ["Link", ref.url], ["Expires", ref.expires_at && clock(ref.expires_at)]];
+  for (const [label, value] of rows) if (value) console.log(`  ${chalk.dim(label.padEnd(9))}${value}`);
+  blank();
+  out.info(`Read the answer with ${statusCommand(ref.id)}`);
+  blank();
+}
+
+function printOpen(ref: RequestRef, request: ApprovalRequest | null, ctx: RenderContext): void {
+  if (request) return printOutcome(request, ctx.outlets, ctx.campaign);
+  printAsk({ id: ref.id, code: ref.code ?? "", url: ref.url ?? "", expires_at: ref.expires_at ?? "", status: "pending" }, { qr: ctx.qr });
+  out.info(`Check the answer with ${statusCommand(ref.id)}`);
+  blank();
+}
+
+function printGone(ref: RequestRef): void {
+  blank();
+  out.error(`TAP has no approval request ${ref.id}.`);
+  out.info("Check the id. A request belongs to the workspace whose key asked for it.");
+  blank();
+}
+
+/** --json: stdout carries one object, and `outcome` names the ending. */
+export function endingJson(ref: RequestRef, ending: Ending, campaignId?: string): object {
+  switch (ending.kind) {
+    case "answered":
+    case "withdrawn":
+      return { outcome: ending.kind, ...outcomeJson(ending.request, campaignId) };
+    case "open":
+      return ending.request
+        ? { outcome: "open", ...outcomeJson(ending.request, campaignId) }
+        : { outcome: "open", ...ref, status: "pending", status_command: statusCommand(ref.id) };
+    case "gone":
+      return { outcome: "gone", id: ref.id, status: "gone", error: "Approval request not found" };
+    case "left_open":
+      return { outcome: "left_open", ...ref, status: "unknown", reason: ending.reason, status_command: statusCommand(ref.id) };
   }
+}
+
+/** The one place a request's ending is reported, as text or as JSON. */
+export function renderEnding(ref: RequestRef, ending: Ending, ctx: RenderContext): void {
+  if (ctx.json) return out.json(endingJson(ref, ending, ctx.campaign.id));
+  switch (ending.kind) {
+    case "answered":
+    case "withdrawn":
+      return printOutcome(ending.request, ctx.outlets, ctx.campaign);
+    case "open":
+      return printOpen(ref, ending.request, ctx);
+    case "gone":
+      return printGone(ref);
+    case "left_open":
+      return printLeftOpen(ref, ending.reason);
+  }
+}
+
+/** The create failed in a way TAP may still have carried out, so there is no id to show. */
+export function printCreateUnknown(reason: string, campaignId: string, json: boolean): void {
+  const url = dashboard.approveAndSend(campaignId);
+  const next = `Look for it in TAP at ${url}. Asking again with tap approve ${campaignId} replaces a request nobody has started answering.`;
+  if (json) return out.json({ outcome: "create_unknown", status: "unknown", reason, may_exist: true, check_url: url, next });
   blank();
-  out.info(`Read the answer with ${statusCommand(created.id)}`);
+  out.error(`${reason}. TAP may have created the request anyway.`);
+  out.info(next);
   blank();
 }

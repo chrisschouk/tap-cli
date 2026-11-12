@@ -7,9 +7,12 @@
  * answers there. The key can only create, read and withdraw a request: it can
  * never approve or send.
  *
- * Exit codes: 0 when at least one pitch was approved (or the request still
- * waits, with --no-wait), 1 when nothing was approved, 130 when the person
- * interrupted (Ctrl+C, c, q, SIGTERM, SIGHUP).
+ * Once the request exists the command ends in one place, `finalise`, with
+ * one of the endings in lib/approval-session.ts, and the exit code comes from
+ * the ending: 0 when at least one pitch was approved (or the request waits by
+ * choice, with --no-wait), 1 when nothing was approved, the request is gone
+ * or an error left it open, 130 when the person stopped (Ctrl+C, c, SIGTERM,
+ * SIGHUP).
  *
  * Usage:
  *   tap approve <campaign-id>                    choose pitches, ask, wait
@@ -29,14 +32,12 @@ import {
   EXIT_CODE,
   MAX_REQUEST_PITCHES,
   createApprovalRequest,
-  exitCodeFor,
-  readApprovalRequest,
+  createMayHaveLanded,
   readWithRetry,
-  waitForAnswer,
-  type ApprovalRequest,
   type CreatedRequest,
 } from "../lib/approval-requests.js";
-import { LostTouch } from "../lib/retry.js";
+import { StopRequest, exitCodeOf, follow, refOf, type Ending, type RequestRef } from "../lib/approval-session.js";
+import { describeFailure, type RetryHooks } from "../lib/retry.js";
 import { dashboard } from "../lib/dashboard.js";
 import { openUrl } from "../lib/browser.js";
 import * as out from "../output.js";
@@ -45,19 +46,10 @@ import { campaignLabel, navHint } from "../ui/detail.js";
 import { blank, createRailSpinner, stepComplete } from "../ui/format.js";
 import { handleError } from "../ui/errors.js";
 import { selectCampaign } from "../ui/actions.js";
-import { holdInterrupts, type InterruptHold } from "../ui/interrupt.js";
+import { onInterrupt } from "../ui/interrupt.js";
 import { pickPitches, recipientText, type PickerPitch } from "../ui/pitch-picker.js";
-import { awaitAnswer, printAsk, retryLog } from "../ui/approve-wait.js";
-import {
-  lostTouchJson,
-  outcomeJson,
-  pitchTable,
-  printLostTouch,
-  printOutcome,
-  printRejected,
-  rejectedJson,
-  type Outlets,
-} from "../ui/approve-report.js";
+import { printAsk, waitOnScreen } from "../ui/approve-wait.js";
+import { pitchTable, printCreateUnknown, printRejected, rejectedJson, renderEnding, type Outlets, type RenderContext } from "../ui/approve-report.js";
 
 interface ApproveOptions {
   all?: boolean;
@@ -181,48 +173,79 @@ function askedDetail(asked: number, chosen: number, code: string): string {
   return `${count}, request ${code}`;
 }
 
-async function ask(ids: string[], loaded: Loaded, opts: ApproveOptions): Promise<CreatedRequest> {
-  try {
-    return await createApprovalRequest(ids);
-  } catch (err) {
-    if (!(err instanceof ApprovalRejected)) throw err;
+/** Why the create failed, for a failure TAP may have carried out anyway. */
+function createFailure(err: unknown, stop: StopRequest): string {
+  return stop.quit.aborted ? "You quit before TAP answered" : describeFailure(err);
+}
+
+/** Nothing exists yet unless TAP may have created the request; then say where to look, as there is no id. */
+function askFailed(err: unknown, loaded: Loaded, opts: ApproveOptions, stop: StopRequest): number {
+  if (err instanceof ApprovalRejected) {
     if (opts.json) out.json(rejectedJson(err.rejected));
     else printRejected(err.rejected, new Map(loaded.pending.map((p) => [p.id, p.subject])));
-    throw new Stop(EXIT_CODE.notApproved);
+    return EXIT_CODE.notApproved;
+  }
+  if (!createMayHaveLanded(err)) throw err;
+  printCreateUnknown(createFailure(err, stop), loaded.campaign.id, Boolean(opts.json));
+  return stop.requested ? EXIT_CODE.interrupted : EXIT_CODE.notApproved;
+}
+
+/** The request, or the exit code when there is none. A first stop during the create withdraws once the id is known. */
+async function ask(ids: string[], loaded: Loaded, opts: ApproveOptions, stop: StopRequest): Promise<CreatedRequest | number> {
+  const announce = () => console.error("  Stopping. The request will be withdrawn once TAP returns it. Press Ctrl+C again to quit at once.");
+  stop.signal.addEventListener("abort", announce);
+  try {
+    return await createApprovalRequest(ids, stop.quit);
+  } catch (err) {
+    return askFailed(err, loaded, opts, stop);
+  } finally {
+    stop.signal.removeEventListener("abort", announce);
   }
 }
 
-function reportNoWait(created: CreatedRequest, opts: ApproveOptions): void {
-  const statusCommand = `tap approve status ${created.id} --wait`;
-  if (opts.json) return out.json({ ...created, status_command: statusCommand });
-  printAsk(created, { qr: interactive(opts) });
-  out.info(`Check the answer with ${statusCommand}`);
-  blank();
-}
-
-async function waitInJson(created: CreatedRequest, campaignId: string, hold: InterruptHold): Promise<ApprovalRequest> {
-  console.error(`Code ${created.code}. Approve at ${created.url}. Ctrl+C withdraws the request.`);
-  const request = await awaitAnswer(created, { keys: false, countdown: false, onOpen: () => {}, hold });
-  out.json(outcomeJson(request, campaignId));
-  return request;
-}
-
-/** The asked pitches with their recipients, the code and the QR. Skipped once the person has interrupted. */
-async function showAsked(created: CreatedRequest, loaded: Loaded, opts: ApproveOptions, hold: InterruptHold): Promise<void> {
-  if (hold.interrupted) return;
-  const asked = await readWithRetry(created, retryLog(created));
-  if (hold.interrupted) return;
+/** The asked pitches with their recipients, the code and the QR. */
+async function showAsked(created: CreatedRequest, loaded: Loaded, opts: ApproveOptions, signal: AbortSignal, hooks: RetryHooks): Promise<void> {
+  const asked = await readWithRetry(created, { ...hooks, signal });
   blank();
   pitchTable(asked.items, loaded.outlets);
   printAsk(created, { qr: interactive(opts) });
 }
 
-async function waitOnScreen(created: CreatedRequest, loaded: Loaded, opts: ApproveOptions, hold: InterruptHold): Promise<ApprovalRequest> {
-  await showAsked(created, loaded, opts, hold);
-  const onOpen = () => openUrl(created.url, (message) => out.error(`Failed to open browser: ${message}`));
-  const request = await awaitAnswer(created, { keys: interactive(opts), countdown: true, onOpen, hold });
-  printOutcome(request, loaded.outlets, { id: loaded.campaign.id, label: campaignLabel(loaded.campaign) });
-  return request;
+function waitFor(created: CreatedRequest, loaded: Loaded, opts: ApproveOptions, stop: StopRequest): Promise<Ending> {
+  if (!opts.wait && !stop.requested) return Promise.resolve({ kind: "open", request: null });
+  if (opts.json) console.error(`Code ${created.code}. Approve at ${created.url}. Ctrl+C withdraws the request.`);
+  return waitOnScreen(created, stop, {
+    keys: interactive(opts),
+    countdown: !opts.json,
+    onOpen: () => openUrl(created.url, (message) => out.error(`Failed to open browser: ${message}`)),
+    prelude: opts.json ? undefined : (signal, hooks) => showAsked(created, loaded, opts, signal, hooks),
+  });
+}
+
+/** Every command that has a request id ends here: report the ending, and return its exit code. */
+function finalise(ref: RequestRef, ending: Ending, ctx: RenderContext): number {
+  renderEnding(ref, ending, ctx);
+  return exitCodeOf(ending);
+}
+
+/** From here on an interrupt is intent: the handler presses `stop`, and the flow turns that into an ending. */
+async function withStopRequest(run: (stop: StopRequest) => Promise<number>): Promise<number> {
+  const stop = new StopRequest();
+  const release = onInterrupt(() => stop.press());
+  try {
+    return await run(stop);
+  } finally {
+    release();
+  }
+}
+
+async function askAndWait(ids: string[], chosen: number, loaded: Loaded, opts: ApproveOptions, stop: StopRequest): Promise<number> {
+  const created = await ask(ids, loaded, opts, stop);
+  if (typeof created === "number") return created;
+  if (!opts.json) stepComplete("Asked", askedDetail(ids.length, chosen, created.code));
+  const ending = await waitFor(created, loaded, opts, stop);
+  const campaign = { id: loaded.campaign.id, label: campaignLabel(loaded.campaign) };
+  return finalise(refOf(created), ending, { json: Boolean(opts.json), qr: interactive(opts), outlets: loaded.outlets, campaign });
 }
 
 async function resolveCampaign(campaignId: string | undefined, opts: ApproveOptions): Promise<string> {
@@ -249,55 +272,27 @@ async function loadWithSpinner(campaignId: string, opts: ApproveOptions): Promis
   }
 }
 
-/** Once the request exists, every way out either reports its answer or says it is still open. */
-async function waitOrReport(created: CreatedRequest, loaded: Loaded, opts: ApproveOptions, hold: InterruptHold): Promise<number> {
-  try {
-    if (!opts.wait && !hold.interrupted) {
-      reportNoWait(created, opts);
-      return EXIT_CODE.approved;
-    }
-    const request = opts.json ? await waitInJson(created, loaded.campaign.id, hold) : await waitOnScreen(created, loaded, opts, hold);
-    return exitCodeFor(request, { interrupted: hold.interrupted });
-  } catch (err) {
-    if (!(err instanceof LostTouch)) throw err;
-    if (opts.json) out.json(lostTouchJson(created, err));
-    else printLostTouch(created, err, { interrupted: hold.interrupted });
-    return hold.interrupted ? EXIT_CODE.interrupted : EXIT_CODE.notApproved;
-  }
-}
-
 async function runApprove(campaignArg: string | undefined, opts: ApproveOptions): Promise<number> {
   const campaignId = await resolveCampaign(campaignArg, opts);
   const loaded = await loadWithSpinner(campaignId, opts);
   const chosen = await pitchesToAsk(loaded, opts);
   if (!chosen) return EXIT_CODE.notApproved;
   const ids = capped(chosen, campaignId, opts);
-  // Held from before the POST: an interrupt during it withdraws once the id is known.
-  const hold = holdInterrupts();
-  try {
-    const created = await ask(ids, loaded, opts);
-    if (!opts.json) stepComplete("Asked", askedDetail(ids.length, chosen.length, created.code));
-    return await waitOrReport(created, loaded, opts, hold);
-  } finally {
-    hold.release();
-  }
+  return withStopRequest((stop) => askAndWait(ids, chosen.length, loaded, opts, stop));
 }
 
-async function runStatus(requestId: string, opts: { wait?: boolean; json?: boolean }): Promise<number> {
-  const first = await readApprovalRequest(requestId);
-  try {
-    const request = opts.wait ? await waitForAnswer(first) : first;
-    if (opts.json) out.json(outcomeJson(request));
-    else printOutcome(request, new Map(), {});
-    return exitCodeFor(request);
-  } catch (err) {
-    if (!(err instanceof LostTouch)) throw err;
-    if (opts.json) out.json(lostTouchJson(first, err));
-    else printLostTouch(first, err, { interrupted: false });
-    return EXIT_CODE.notApproved;
-  }
+function runStatus(requestId: string, opts: { wait?: boolean; json?: boolean }): Promise<number> {
+  return withStopRequest(async (stop) => {
+    const { ref, ending } = await follow(requestId, { wait: Boolean(opts.wait), stop });
+    return finalise(ref, ending, { json: Boolean(opts.json), qr: false, outlets: new Map(), campaign: {} });
+  });
 }
 
+/**
+ * The process exits here and nowhere else. Errors that reach it come from
+ * before a request exists. Inside the interactive menu `process.exit` throws
+ * back to the menu, after every finally block has run.
+ */
 function exiting(run: () => Promise<number>): Promise<void> {
   return run().then(
     (code) => process.exit(code),

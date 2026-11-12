@@ -300,9 +300,11 @@ tap approve <campaign-id> --all --no-wait --json   # for agents: return the requ
 tap approve status <request-id> --wait --json      # then wait for the answer
 ```
 
-While it waits, `o` opens the link on this computer and `c` or Ctrl+C withdraws the request. SIGTERM and SIGHUP withdraw it too. A request expires after 15 minutes. If nothing waits for approval but the campaign has drafts, `tap approve` lists them and prints the TAP page where you send them for approval.
+While it waits, `o` opens the link on this computer and `c` or Ctrl+C withdraws the request. SIGTERM and SIGHUP withdraw it too. Press `c` or Ctrl+C a second time to quit without waiting for the withdrawal. A request expires after 15 minutes. If nothing waits for approval but the campaign has drafts, `tap approve` lists them and prints the TAP page where you send them for approval.
 
-If TAP stops answering while it waits (a dropped connection, a 5xx or a 429), `tap approve` keeps trying until the request expires, honouring Retry-After. If it still cannot reach TAP, it says the request was not withdrawn, prints its id, code and link, and the command that reads the answer later: `tap approve status <request-id> --wait`. With `--json` it prints `{ "id", "status": "unknown", "status_command" }`.
+If TAP stops answering while it waits (a dropped connection, a 5xx or a 429), `tap approve` keeps trying until the request expires, honouring Retry-After. Whenever it stops without an answer or a confirmed withdrawal (TAP unreachable, the key refused with 401 or 403, a withdrawal that failed, or you quit), it says why, that the request may still be answered, and prints its id, code, link, expiry and the command that reads the answer later: `tap approve status <request-id> --wait`. With `--json`, stdout carries `{ "outcome": "left_open", "id", "code", "url", "expires_at", "status": "unknown", "reason", "status_command" }`. Every `--json` result names its ending in `outcome`: `answered`, `withdrawn`, `open`, `gone` or `left_open`.
+
+If TAP does not answer the request to ask (it times out after 15 seconds, or you quit while it is in flight), there is no id to show, so `tap approve` says TAP may have created the request and links to the release's pitching tab. Asking again replaces a request nobody has started answering.
 
 In the chooser, space chooses a pitch, `a` chooses all or none, `r` shows the whole pitch, enter asks and `q` quits. The list scrolls, so a long campaign fits a small terminal. TAP lists who each pitch goes to once you ask, before the code; if one is wrong, `c` withdraws the request. The read view shows the subject and body; TAP adds the release block and the sender when it sends, and the approve page shows the whole email.
 
@@ -322,8 +324,8 @@ Exit codes:
 | Code | Meaning |
 |------|---------|
 | 0 | At least one pitch was approved, or the request still waits (`--no-wait`, `status` without `--wait`) |
-| 1 | Nothing was approved: declined, expired, every pitch skipped, replaced by a newer request, or TAP could not be reached |
-| 130 | You stopped it: Ctrl+C, `c` or `q`, or SIGTERM or SIGHUP. An open request is withdrawn first |
+| 1 | Nothing was approved: declined, expired, every pitch skipped, replaced by a newer request, no such request, or the CLI stopped without an answer (TAP unreachable, the key refused) |
+| 130 | You stopped it: Ctrl+C, `c` or `q`, or SIGTERM or SIGHUP. An open request is withdrawn first; a second press quits and prints the request so you can read it later |
 
 ---
 

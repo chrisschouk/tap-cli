@@ -2,9 +2,11 @@
  * Retrying reads that must outlast a blip. A request a person may still answer
  * must not be abandoned because one read failed: network errors, 5xx and 429
  * are retried with capped backoff (429 and 503 honour Retry-After) until a
- * deadline, and only then reported as lost touch.
+ * deadline, and only then reported as lost touch. An abort signal stops the
+ * attempt in flight and the wait between attempts.
  */
 
+import { setTimeout as sleep } from "node:timers/promises";
 import { TapApiError } from "./rest.js";
 
 const FIRST_DELAY_MS = 1_000;
@@ -18,7 +20,7 @@ export function isTransient(err: unknown): boolean {
   return err.name === "TimeoutError" || (err instanceof TypeError && err.cause !== undefined);
 }
 
-function describeFailure(err: unknown): string {
+export function describeFailure(err: unknown): string {
   if (err instanceof TapApiError) return `TAP answered ${err.status}`;
   if (err instanceof Error && err.name === "TimeoutError") return "TAP took too long to answer";
   return "Could not reach TAP";
@@ -46,25 +48,36 @@ export interface RetryHooks {
 }
 
 export interface RetryOptions extends RetryHooks {
-  /** Epoch ms. No attempt starts after this. */
+  /** Epoch ms. No attempt starts after this. A deadline that is not a number allows no retries. */
   until: number;
+  /** Aborting rejects with the signal's reason, whether an attempt is in flight or the next one is waiting. */
+  signal?: AbortSignal;
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+function msLeft(until: number): number {
+  return Number.isFinite(until) ? until - Date.now() : 0;
+}
 
-export async function retrying<T>(op: () => Promise<T>, opts: RetryOptions): Promise<T> {
+/** How long to wait before trying again, or throw: the abort reason, a failure not worth retrying, or LostTouch past the deadline. */
+function nextDelay(err: unknown, attempt: number, opts: RetryOptions): number {
+  opts.signal?.throwIfAborted();
+  if (!isTransient(err)) throw err;
+  const left = msLeft(opts.until);
+  if (left <= 0) throw new LostTouch(describeFailure(err));
+  return Math.min(left, retryDelayMs(err, attempt));
+}
+
+export async function retrying<T>(op: (signal?: AbortSignal) => Promise<T>, opts: RetryOptions): Promise<T> {
   for (let attempt = 0; ; attempt++) {
+    opts.signal?.throwIfAborted();
     try {
-      const value = await op();
+      const value = await op(opts.signal);
       if (attempt > 0) opts.onRecover?.();
       return value;
     } catch (err) {
-      const left = opts.until - Date.now();
-      if (!isTransient(err)) throw err;
-      if (left <= 0) throw new LostTouch(describeFailure(err));
-      const delay = Math.min(left, retryDelayMs(err, attempt));
+      const delay = nextDelay(err, attempt, opts);
       opts.onRetry?.(describeFailure(err), delay);
-      await sleep(delay);
+      await sleep(delay, undefined, { signal: opts.signal });
     }
   }
 }

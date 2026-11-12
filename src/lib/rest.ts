@@ -13,6 +13,8 @@ export interface RestRequestInit {
   query?: Record<string, string | number | boolean | undefined>;
   /** Abort the request after this long. A long-poll sets it above the time the server holds the read. */
   timeoutMs?: number;
+  /** Abort the request when this fires, as well as on the timeout. */
+  signal?: AbortSignal;
 }
 
 export class TapApiError extends Error {
@@ -94,7 +96,7 @@ export async function restRequest<T = unknown>(
       "User-Agent": "@totalaudiopromo/tap-cli",
     },
     body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
-    signal: init.timeoutMs ? AbortSignal.timeout(init.timeoutMs) : undefined,
+    signal: requestSignal(init),
   });
 
   const text = await res.text();
@@ -112,6 +114,11 @@ export async function restRequest<T = unknown>(
   }
 
   return (json as T) ?? ({} as T);
+}
+
+function requestSignal(init: RestRequestInit): AbortSignal | undefined {
+  const signals = [init.signal, init.timeoutMs ? AbortSignal.timeout(init.timeoutMs) : undefined].filter((s) => s !== undefined);
+  return signals.length > 1 ? AbortSignal.any(signals) : signals[0];
 }
 
 /** Retry-After is either seconds or an HTTP date. */

@@ -1,7 +1,7 @@
 /**
  * The ask and the wait: the code, the link and a QR of it, then a countdown
  * until a person answers in TAP. `o` opens the link here; `c` or Ctrl+C
- * withdraws the request.
+ * asks to withdraw the request, and a second press quits without waiting.
  */
 
 import { emitKeypressEvents } from "node:readline";
@@ -10,15 +10,9 @@ import ora from "ora";
 import { renderUnicodeCompact } from "uqr";
 import { COLOUR, GLYPH } from "./theme.js";
 import { stripAnsi } from "./detail.js";
-import { exitInterrupted, type InterruptHold } from "./interrupt.js";
-import {
-  isFinal,
-  waitForAnswer,
-  withdrawApprovalRequest,
-  type ApprovalRequest,
-  type CreatedRequest,
-} from "../lib/approval-requests.js";
+import type { CreatedRequest } from "../lib/approval-requests.js";
 import type { RetryHooks } from "../lib/retry.js";
+import { settle, type Ending, type SessionView, type StopRequest } from "../lib/approval-session.js";
 
 const accent = chalk.hex(COLOUR.primary);
 const QR_GAP = 4;
@@ -72,13 +66,13 @@ export function printAsk(created: CreatedRequest, opts: { qr: boolean }): void {
 }
 
 interface WaitOptions {
-  /** Read `o` and `c` from a TTY. Otherwise only a signal withdraws. */
+  /** Read `o` and `c` from a TTY. Otherwise only a signal stops the wait. */
   keys: boolean;
   /** Draw the countdown. Off for --json, where stdout is the answer. */
   countdown: boolean;
   onOpen: () => void;
-  /** Taken before the request was created, so an earlier interrupt withdraws at once. */
-  hold: InterruptHold;
+  /** Runs before the countdown starts, with the keys already live. */
+  prelude?: (signal: AbortSignal, hooks: RetryHooks) => Promise<void>;
 }
 
 function waitingText(created: CreatedRequest, keys: boolean, note: string | null): string {
@@ -87,42 +81,35 @@ function waitingText(created: CreatedRequest, keys: boolean, note: string | null
   return `${status}${hint}`;
 }
 
-/** Retry notes as stderr lines, for reads made before the countdown starts. */
-export function retryLog(created: Pick<CreatedRequest, "expires_at">): RetryHooks {
-  return {
-    onRetry: (reason, delayMs) => console.error(`  ${retryNote(reason, delayMs, created)}`),
-    onRecover: () => console.error("  Back in touch with TAP."),
-  };
-}
-
 function retryNote(reason: string, delayMs: number, created: Pick<CreatedRequest, "expires_at">): string {
   return `${reason}. Trying again in ${Math.ceil(delayMs / 1000)}s, until ${clockTime(created.expires_at)}`;
 }
 
-/** The countdown line. Without a spinner on screen, retry notes go to stderr as lines. */
+/** The countdown line, started once the prelude is done. Without a spinner on screen, notes go to stderr as lines. */
 function waitingLine(created: CreatedRequest, opts: WaitOptions) {
   let note: string | null = null;
   const spinner = ora({ text: waitingText(created, opts.keys, note), prefixText: " ", spinner: "dots", isEnabled: opts.countdown && process.stdout.isTTY });
-  if (opts.countdown) spinner.start();
   const render = () => (spinner.text = waitingText(created, opts.keys, note));
   const tick = setInterval(render, 1000);
-  const log = (text: string) => (spinner.isSpinning ? undefined : console.error(`  ${text}`));
-  return {
-    note(text: string | null) {
-      note = text;
-      render();
-    },
+  const say = (text: string | null) => {
+    note = text;
+    render();
+    if (text && !spinner.isSpinning) console.error(`  ${text}`);
+  };
+  const view: SessionView = {
+    note: say,
     hooks: {
-      onRetry: (reason: string, delayMs: number) => {
-        note = retryNote(reason, delayMs, created);
-        render();
-        log(note);
-      },
+      onRetry: (reason, delayMs) => say(retryNote(reason, delayMs, created)),
       onRecover: () => {
-        note = null;
-        render();
-        log("Back in touch with TAP.");
+        say(null);
+        if (!spinner.isSpinning) console.error("  Back in touch with TAP.");
       },
+    },
+  };
+  return {
+    view,
+    start() {
+      if (opts.countdown) spinner.start();
     },
     stop() {
       clearInterval(tick);
@@ -131,6 +118,7 @@ function waitingLine(created: CreatedRequest, opts: WaitOptions) {
   };
 }
 
+/** Raw keys until the returned function runs. Ctrl+C arrives as a key in raw mode. */
 function listenForKeys(actions: Record<string, () => void>, onCtrlC: () => void): () => void {
   const { stdin } = process;
   const onKey = (_: string, key: { name?: string; ctrl?: boolean }) => {
@@ -149,37 +137,24 @@ function listenForKeys(actions: Record<string, () => void>, onCtrlC: () => void)
 }
 
 /**
- * Wait for the person's answer, or for a withdrawal the server accepts. A
- * withdrawal refused because someone is answering keeps waiting for them.
- * A second interrupt while withdrawing exits at once.
+ * Wait for the person's answer with the countdown and keys on screen. `c` and
+ * Ctrl+C press `stop`; the flow decides what that means. The keys, the raw
+ * mode and the countdown are released before this returns, whatever the ending.
  */
-export function awaitAnswer(created: CreatedRequest, opts: WaitOptions): Promise<ApprovalRequest> {
+export async function waitOnScreen(created: CreatedRequest, stop: StopRequest, opts: WaitOptions): Promise<Ending> {
   const line = waitingLine(created, opts);
-  let cancelling = false;
-  let done = false;
-
-  return new Promise((resolve, reject) => {
-    const settle = <T>(fn: (value: T) => void) => (value: T) => {
-      if (done) return;
-      done = true;
-      line.stop();
-      stopKeys();
-      fn(value);
-    };
-    const finish = settle(resolve);
-    const fail = settle(reject);
-    const cancel = () => {
-      if (cancelling) exitInterrupted();
-      cancelling = true;
-      line.note("Withdrawing the request");
-      withdrawApprovalRequest(created, line.hooks).then((request) => {
-        if (isFinal(request)) return finish(request);
-        cancelling = false;
-        line.note("Someone is answering now. Waiting for their answer");
-      }, fail);
-    };
-    const stopKeys = opts.keys ? listenForKeys({ o: opts.onOpen, c: opts.hold.trigger }, opts.hold.trigger) : () => {};
-    opts.hold.handle(cancel);
-    waitForAnswer(created, { ...line.hooks, stopped: () => done }).then(finish, fail);
-  });
+  const press = () => stop.press();
+  const stopKeys = opts.keys ? listenForKeys({ o: opts.onOpen, c: press }, press) : () => {};
+  try {
+    return await settle(created, stop, {
+      ...line.view,
+      prelude: async (signal, hooks) => {
+        await opts.prelude?.(signal, hooks);
+        line.start();
+      },
+    });
+  } finally {
+    line.stop();
+    stopKeys();
+  }
 }
