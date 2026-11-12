@@ -4,6 +4,13 @@
  * total-audio-platform/apps/tap/app/api/v1 (select lists, `limit` clamped to
  * 200, `updated_at desc` ordering on the outreach queue, 500 contacts per
  * import, 200 contact ids per campaign link, results capped at 100).
+ *
+ * Approval requests follow apps/tap/app/api/v1/approval-requests: POST
+ * refuses with 422 unless every pitch waits for approval, GET holds the
+ * connection for up to `?wait` seconds (max 25) while pending and reads as
+ * expired past the deadline, and cancel answers 409 with the request once a
+ * person has started answering. Tests answer through `answerApproval`, which
+ * stands in for the signed-in person on the approve page.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -37,6 +44,8 @@ interface Contact {
 interface QueueRow {
   id: string;
   subject: string;
+  body: string;
+  to: string | null;
   state: string;
   send_status: string;
   scheduled_for: string | null;
@@ -44,6 +53,23 @@ interface QueueRow {
 }
 
 type Reply = [number, unknown];
+
+export type ApprovalAnswer = "decline" | "claim" | { skip?: Record<string, string> };
+
+interface FakeApproval {
+  id: string;
+  code: string;
+  status: string;
+  items: Array<{ pitch_id: string; to: string | null; subject: string | null }>;
+  result: { approved: string[]; skipped: Array<{ id: string; reason: string }> } | null;
+  created_at: string;
+  expires_at: string;
+  answered_at: string | null;
+  answered_via: string | null;
+}
+
+const UUID = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+const CODES = ["K7QM", "H4TW", "R9PX", "B3NV", "Z6CJ"];
 type Handler = (req: { query: Record<string, string>; body: unknown; params: string[] }) => Reply;
 
 export const CAMPAIGN_ID = "0b6f7a52-1c1d-4e0a-9d3e-5a1f2c3b4d5e";
@@ -80,12 +106,21 @@ function iso(minutesAgo: number): string {
   return new Date(Date.UTC(2026, 10, 11, 12, 0) - minutesAgo * 60_000).toISOString();
 }
 
+const NAMED = [
+  { name: "Jo Presenter", email: "jo@bbc.co.uk", outlet: "BBC Radio 6 Music" },
+  { name: "Maya Okafor", email: "maya@nts.live", outlet: "NTS Radio" },
+  { name: "Dev Shah", email: "dev@worldwidefm.net", outlet: "Worldwide FM" },
+];
+
+const BODY = (name: string) =>
+  `Hi ${name},\n\nNight Drive is the new single from sadact, out 1 December. It is a slow, late-night track built around a looped Rhodes and a drum machine.\n\nI think it would sit well on your show. Happy to send stems or a clean edit.\n\nThanks,\nChris`;
+
+const named = (i: number) => NAMED[i] ?? { name: `Contact ${i + 1}`, email: `contact${i + 1}@example.com`, outlet: `Outlet ${i + 1}` };
+
 function seedContacts(count: number): Contact[] {
   return Array.from({ length: count }, (_, i) => ({
     id: uuid(0xc0, i + 1),
-    name: i === 0 ? "Jo Presenter" : `Contact ${i + 1}`,
-    email: i === 0 ? "jo@bbc.co.uk" : `contact${i + 1}@example.com`,
-    outlet: i === 0 ? "BBC Radio 6 Music" : `Outlet ${i + 1}`,
+    ...named(i),
     role: i === 0 ? "presenter" : null,
     pipeline_status: "new",
     enriched: i % 3 === 0,
@@ -107,17 +142,31 @@ function seedQueue(sent: number): QueueRow[] {
   const sentRows = Array.from({ length: sent }, (_, i) => ({
     id: uuid(0xa0, i + 1),
     subject: `Sent pitch ${i + 1}`,
+    body: "",
+    to: null,
     state: "sent",
     send_status: "sent",
     scheduled_for: null,
     updated_at: iso(i),
   }));
+  const row = (n: number, subject: string, state: string, send_status: string, to: number | null, scheduled_for: string | null = null): QueueRow => ({
+    id: uuid(0xb0, n),
+    subject,
+    body: to === null ? "" : BODY(NAMED[to].name.split(" ")[0]),
+    to: to === null ? null : NAMED[to].email,
+    state,
+    send_status,
+    scheduled_for,
+    updated_at: iso(sent + n),
+  });
   const waiting: QueueRow[] = [
-    { id: uuid(0xb0, 1), subject: "Night Drive for your Friday show", state: "pending_approval", send_status: "draft", scheduled_for: null, updated_at: iso(sent + 1) },
-    { id: uuid(0xb0, 2), subject: "Approved already", state: "approved", send_status: "draft", scheduled_for: "2026-11-12T09:00:00Z", updated_at: iso(sent + 2) },
-    { id: uuid(0xb0, 3), subject: "Gmail refused this one", state: "approved", send_status: "failed", scheduled_for: null, updated_at: iso(sent + 3) },
-    { id: uuid(0xb0, 4), subject: "Waiting on the release pack", state: "approved", send_status: "held_for_payment", scheduled_for: null, updated_at: iso(sent + 4) },
-    { id: uuid(0xb0, 5), subject: "Still a draft", state: "draft", send_status: "draft", scheduled_for: null, updated_at: iso(sent + 5) },
+    row(1, "Night Drive for your Friday show", "pending_approval", "draft", 0),
+    row(2, "Approved already", "approved", "draft", null, "2026-11-12T09:00:00Z"),
+    row(3, "Gmail refused this one", "approved", "failed", null),
+    row(4, "Waiting on the release pack", "approved", "held_for_payment", null),
+    row(5, "Still a draft", "draft", "draft", 1),
+    row(6, "Night Drive, a late one for NTS", "pending_approval", "draft", 1),
+    row(7, "New sadact single for Worldwide FM", "pending_approval", "draft", 2),
   ];
   return [...sentRows, ...waiting];
 }
@@ -139,7 +188,7 @@ export interface FakeTapOptions {
   sentPitches?: number;
 }
 
-export function fakeTapState(opts: FakeTapOptions = {}) {
+export function fakeTapState(opts: FakeTapOptions = {}, appUrl = "https://totalaudiopromo.com") {
   const contacts = seedContacts(opts.contacts ?? 230);
   const queue = seedQueue(opts.sentPitches ?? 220);
   const campaignContacts = [
@@ -231,7 +280,7 @@ export function fakeTapState(opts: FakeTapOptions = {}) {
         id: r.id,
         title: null,
         subject: r.subject,
-        body: "",
+        body: r.body,
         source: "api",
         voice_profile_id: null,
         send_status: r.send_status,
@@ -244,7 +293,137 @@ export function fakeTapState(opts: FakeTapOptions = {}) {
     },
   ];
 
+  const approvals = new Map<string, FakeApproval>();
+  const approvalCtl = { ttlMs: 15 * 60_000 };
+
+  const publicRequest = (a: FakeApproval) => {
+    const final = a.status !== "pending";
+    return {
+      id: a.id,
+      code: a.code,
+      status: a.status,
+      url: `${appUrl}/approve/${a.id}`,
+      origin: "cli",
+      item_count: a.items.length,
+      items: a.items,
+      result: a.result,
+      created_at: a.created_at,
+      expires_at: a.expires_at,
+      answered_at: final ? a.answered_at : null,
+      answered_via: final ? a.answered_via : null,
+    };
+  };
+
+  /** store.ts expireIfDue: past the deadline an unclaimed request expires. */
+  const expireIfDue = (a: FakeApproval) => {
+    if (a.status === "pending" && !a.answered_at && Date.parse(a.expires_at) <= Date.now()) a.status = "expired";
+    return a;
+  };
+
+  /** The route's zod body: 1 to 50 distinct uuids and a known origin. */
+  const parseAsk = (body: unknown): string[] | null => {
+    const { pitch_ids: ids, origin } = (body ?? {}) as { pitch_ids?: string[]; origin?: string };
+    if (!Array.isArray(ids) || ids.length < 1 || ids.length > 50) return null;
+    if (new Set(ids).size !== ids.length || !ids.every((id) => UUID.test(id))) return null;
+    return ["cli", "mcp", "agent_session"].includes(origin ?? "") ? ids : null;
+  };
+
+  const rejectionOf = (id: string) => {
+    const row = queue.find((r) => r.id === id);
+    if (!row) return "not_found";
+    return row.state === "pending_approval" ? null : "not_pending";
+  };
+
+  /** store.ts supersedeOverlapping: an unclaimed pending request that shares a pitch is replaced. */
+  const supersede = (ids: string[]) => {
+    for (const other of approvals.values()) {
+      if (other.status === "pending" && !other.answered_at && other.items.some((i) => ids.includes(i.pitch_id))) other.status = "superseded";
+    }
+  };
+
+  const createApproval: Handler = ({ body }) => {
+    const ids = parseAsk(body);
+    if (!ids) return [400, { error: "Body needs pitch_ids (1 to 50 pitch ids) and origin (cli, mcp or agent_session)" }];
+    const rejected = ids.map((id) => ({ id, reason: rejectionOf(id) })).filter((r) => r.reason !== null);
+    if (rejected.length > 0) return [422, { error: "Some pitches cannot be approved now", rejected }];
+    supersede(ids);
+    const now = Date.now();
+    const approval: FakeApproval = {
+      id: uuid(0xf0, approvals.size + 1),
+      code: CODES[approvals.size % CODES.length],
+      status: "pending",
+      items: ids.map((id) => {
+        const row = queue.find((r) => r.id === id)!;
+        return { pitch_id: id, to: row.to, subject: row.subject };
+      }),
+      result: null,
+      created_at: new Date(now).toISOString(),
+      expires_at: new Date(now + approvalCtl.ttlMs).toISOString(),
+      answered_at: null,
+      answered_via: null,
+    };
+    approvals.set(approval.id, approval);
+    const view = publicRequest(approval);
+    return [201, { id: view.id, code: view.code, url: view.url, expires_at: view.expires_at, status: view.status }];
+  };
+
+  const readApproval: Handler = ({ params }) => {
+    const found = approvals.get(params[0]);
+    return found ? [200, publicRequest(expireIfDue(found))] : [404, { error: "Approval request not found" }];
+  };
+
+  const cancelApproval: Handler = ({ params }) => {
+    const found = approvals.get(params[0]);
+    if (!found) return [404, { error: "Approval request not found" }];
+    const a = expireIfDue(found);
+    if (a.status === "pending" && !a.answered_at) {
+      a.status = "cancelled";
+      return [200, publicRequest(a)];
+    }
+    return [409, { error: "This request can no longer be cancelled", request: publicRequest(a) }];
+  };
+
+  /** The signed-in person on the approve page. `claim` starts answering without finishing. */
+  function answerApproval(id: string, answer: ApprovalAnswer) {
+    const a = approvals.get(id);
+    if (!a || a.status !== "pending") throw new Error(`approval ${id} is not pending`);
+    a.answered_at = new Date().toISOString();
+    a.answered_via = "web_session";
+    if (answer === "claim") return;
+    if (answer === "decline") {
+      a.status = "declined";
+      a.result = { approved: [], skipped: [] };
+      return;
+    }
+    a.result = approvalResult(a, answer.skip ?? {});
+    a.status = statusForResult(a.result);
+    for (const row of queue) if (a.result.approved.includes(row.id)) row.state = "approved";
+  }
+
+  /** model.ts statusForResult. */
+  const statusForResult = (r: NonNullable<FakeApproval["result"]>) => (r.skipped.length === 0 && r.approved.length > 0 ? "approved" : "partial");
+
+  function approvalResult(a: FakeApproval, skip: Record<string, string>) {
+    const approved = a.items.map((i) => i.pitch_id).filter((pid) => !(pid in skip));
+    return { approved, skipped: Object.entries(skip).map(([id, reason]) => ({ id, reason })) };
+  }
+
+  /** POST /pitches/:id/propose: a draft with a recipient moves to pending_approval; nothing approves. */
+  const proposeDraft: Handler = ({ params, body }) => {
+    const reason = (body as { reason?: string } | undefined)?.reason ?? "";
+    if (reason.trim().length < 8) return [400, { error: "reason is required (at least 8 characters)" }];
+    const row = queue.find((r) => r.id === params[0]);
+    if (!row) return [404, { error: "Pitch draft not found in this workspace" }];
+    if (!row.to) return [409, { error: "The pitch needs one saved, attached recipient before it can be proposed." }];
+    row.state = "pending_approval";
+    return [200, { ok: true, pitch_id: row.id, campaign: CAMPAIGN.name, approval_state: "pending_approval", scheduled_at: null, message: "Proposal queued for human review." }];
+  };
+
   const routes: Array<[string, RegExp, Handler]> = [
+    ["POST", /^\/api\/v1\/approval-requests$/, createApproval],
+    ["GET", /^\/api\/v1\/approval-requests\/([^/]+)$/, readApproval],
+    ["POST", /^\/api\/v1\/approval-requests\/([^/]+)\/cancel$/, cancelApproval],
+    ["POST", /^\/api\/v1\/pitches\/([^/]+)\/propose$/, proposeDraft],
     ["GET", /^\/api\/v1\/campaigns$/, ({ query }) => {
       const rows = query.status ? [CAMPAIGN].filter((c) => c.status === query.status) : [CAMPAIGN];
       const { rows: pageRows, page, limit } = pageOf(rows, query);
@@ -291,12 +470,26 @@ export function fakeTapState(opts: FakeTapOptions = {}) {
     return [404, { error: "Not found" }];
   }
 
-  return { contacts, queue, handle };
+  /** GET ?wait holds a pending request open, polling each 100 ms (the route polls each second). */
+  function waitSeconds(method: string, path: string, query: Record<string, string>): number {
+    const match = method === "GET" ? /^\/api\/v1\/approval-requests\/([^/]+)$/.exec(path) : null;
+    const a = match ? approvals.get(match[1]) : undefined;
+    if (!a || expireIfDue(a).status !== "pending") return 0;
+    const raw = Number(query.wait ?? 0);
+    return Number.isFinite(raw) ? Math.min(25, Math.max(0, Math.floor(raw))) : 0;
+  }
+
+  function stillPending(path: string): boolean {
+    const a = approvals.get(path.split("/").pop() ?? "");
+    return Boolean(a && expireIfDue(a).status === "pending");
+  }
+
+  return { contacts, queue, approvals, approvalCtl, answerApproval, handle, waitSeconds, stillPending };
 }
 
 export async function startFakeTap(opts: FakeTapOptions = {}, port = 0) {
-  let state = fakeTapState(opts);
   const requests: Recorded[] = [];
+  let state: ReturnType<typeof fakeTapState>;
 
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     let raw = "";
@@ -307,23 +500,34 @@ export async function startFakeTap(opts: FakeTapOptions = {}, port = 0) {
       const body = raw ? JSON.parse(raw) : undefined;
       const auth = req.headers.authorization;
       requests.push({ method: req.method ?? "", path: url.pathname, query, auth, body });
-      const [status, payload] =
-        auth === `Bearer ${NO_PLAN_KEY}` ? PLAN_REFUSAL : state.handle(req.method ?? "", url.pathname, query, body);
-      res.writeHead(status, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(payload));
+      const reply = () => {
+        const [status, payload] =
+          auth === `Bearer ${NO_PLAN_KEY}` ? PLAN_REFUSAL : state.handle(req.method ?? "", url.pathname, query, body);
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(payload));
+      };
+      const deadline = Date.now() + state.waitSeconds(req.method ?? "", url.pathname, query) * 1000;
+      const poll = () => (Date.now() < deadline && state.stillPending(url.pathname) && !req.socket.destroyed ? setTimeout(poll, 100) : reply());
+      poll();
     });
   });
   await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  state = fakeTapState(opts, url);
 
   return {
-    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    url,
     requests,
     get state() {
       return state;
     },
     reset() {
-      state = fakeTapState(opts);
+      state = fakeTapState(opts, url);
     },
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      }),
   };
 }
