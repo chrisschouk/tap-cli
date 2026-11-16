@@ -72,3 +72,9 @@ fragment runs, no tricolons, no delve/leverage/seamless/ecosystem AI vocabulary,
 first-person specific over third-person hypothetical, UK spelling. Public-facing copy
 additionally passes commodity-gate + brand-voice-guide before publishing. If it reads
 like a language model wrote it, rewrite it before committing.
+
+## Local preview links (Tailscale)
+
+Any time you give me a link to something running on this computer (a preview, a review page, a dashboard), give me a Tailscale link, never localhost. I work across several computers and my phone. Publish it with tailscale serve, open the link yourself to check it works, then send it.
+
+Keep this tailnet-only: use Tailscale Serve, never Funnel or another public tunnel. Check existing Serve routes before changing them; do not reset or overwrite unrelated services. Use the actual URL returned by Serve and verify the intended page opens there. If Tailscale, HTTPS setup, permissions or page verification is blocked, report that blocker rather than inventing a link or claiming success. Localhost is still fine as the internal proxy target, never as the link handed to Chris. The host and app must stay running, with both devices connected to the same tailnet.
